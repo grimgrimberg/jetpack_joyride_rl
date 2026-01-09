@@ -1,0 +1,64 @@
+[project]
+name = "jetpack-joyride-rl"
+version = "0.1.0"
+description = "Train a PPO agent to play Jetpack Joyride on PPSSPP"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "gymnasium>=0.29.0",
+    "stable-baselines3>=2.0.0",
+    "opencv-python>=4.8.0",
+    "mss>=9.0.0",
+    "pywin32>=306",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+ocr = ["pytesseract>=0.3.10"]
+wandb = ["wandb>=0.15.0"]
+viz = ["torchviz>=0.0.2", "graphviz>=0.20.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+]
+all = [
+    "pytesseract>=0.3.10",
+    "wandb>=0.15.0",
+    "torchviz>=0.0.2",
+    "graphviz>=0.20.0",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # Line too long - handled by formatter
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["ppsspp_jetpack_rl", "backends"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
