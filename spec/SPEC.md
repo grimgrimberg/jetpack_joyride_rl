@@ -222,8 +222,9 @@ Key configuration values with their purposes:
 
 1. **Background mode input**: While background capture works, keyboard input STILL requires window focus. The `--background` flag enables capture without focus but input delivery will focus the window.
 
-2. **DPI scaling**: The application does not call `SetProcessDPIAware()`. On systems with >100% scaling, screen coordinates may be incorrect.
+2. **DPI scaling**: The application calls `SetProcessDpiAwareness(2)` at startup for Per-Monitor DPI awareness. However, systems with >150% scaling may still experience edge cases with coordinate alignment.
 
 3. **PrintWindow reliability**: Some graphics drivers (especially Vulkan) may return black frames with PrintWindow.
 
 4. **OCR variability**: Tesseract accuracy depends on game resolution, font rendering, and preprocessing parameters.
+

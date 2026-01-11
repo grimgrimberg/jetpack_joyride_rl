@@ -21,67 +21,67 @@ This document maps requirements to tests and specifies the type of verification 
 
 | Req ID | Requirement | Test Type | Test File/Location | Status |
 |--------|-------------|-----------|--------------------|-|
-| FR-1.1 | Foreground capture (mss) | Integration (Real) | Manual smoke | TODO |
-| FR-1.2 | Background capture (PrintWindow) | Integration (Real) | Manual smoke | TODO |
-| FR-1.3 | Capture region from config | Unit | `tests/test_capture.py::test_region_from_config` | TODO |
-| FR-1.4 | BGR numpy output | Unit | `tests/test_capture.py::test_output_format` | TODO |
-| FR-2.1 | Calibrate capture GUI | Manual | AC-1.1 | TODO |
-| FR-2.2 | Calibrate score GUI | Manual | AC-1.2 | TODO |
-| FR-2.3 | GUI live preview | Manual | AC-1.1 | TODO |
-| FR-2.4 | 84×84 preview | Manual | AC-1.1 | TODO |
-| FR-2.5 | No keyboard interference | Manual | AC-1.1 | TODO |
-| FR-3.1 | Action key control | Integration (Fake) | `tests/test_input.py::test_action_key` | TODO |
-| FR-3.2 | Reset keys | Integration (Fake) | `tests/test_input.py::test_reset_keys` | TODO |
-| FR-3.3 | Focus before input | Unit | `tests/test_input.py::test_focus_called` | TODO |
-| FR-3.4 | Hold mode | Integration (Fake) | `tests/test_env.py::test_hold_mode` | TODO |
-| FR-3.5 | Tap mode | Integration (Fake) | `tests/test_env.py::test_tap_mode` | TODO |
-| FR-4.1 | Grayscale conversion | Unit | `tests/test_preprocess.py::test_grayscale` | TODO |
-| FR-4.2 | Resize to 84×84 | Unit | `tests/test_preprocess.py::test_resize` | TODO |
-| FR-4.3 | Frame stacking | Unit | `tests/test_env.py::test_frame_stacking` | TODO |
-| FR-4.4 | Dtype uint8 | Unit | `tests/test_env.py::test_observation_dtype` | TODO |
-| FR-5.1 | OCR delta reward | Unit | `tests/test_reward.py::test_ocr_delta_reward` | TODO |
-| FR-5.2 | Fallback reward | Unit | `tests/test_reward.py::test_fallback_reward` | TODO |
-| FR-5.3 | Game-over penalty | Unit | `tests/test_reward.py::test_gameover_penalty` | TODO |
-| FR-6.1 | Template matching done | Unit | `tests/test_done.py::test_template_done` | TODO |
-| FR-6.2 | Motion-based done | Unit | `tests/test_done.py::test_motion_done` | TODO |
-| FR-6.3 | Detection toggles | Unit | `tests/test_done.py::test_detection_toggles` | TODO |
-| FR-7.1 | Training starts | Integration (Fake) | `tests/test_training.py::test_ppo_init` | TODO |
-| FR-7.2 | Checkpoint saving | Manual | AC-3.1 | TODO |
-| FR-7.3 | Resume training | Manual | AC-3.2 | TODO |
-| FR-7.4 | W&B integration | Manual | Optional | TODO |
-| FR-7.5 | TensorBoard logs | Manual | AC-3.1 | TODO |
-| FR-8.1 | Load model for eval | Unit | `tests/test_eval.py::test_model_load` | TODO |
-| FR-8.2 | Episode rewards | Manual | AC-4 | TODO |
-| FR-8.3 | Average reward | Manual | AC-4 | TODO |
-| FR-9.1 | Tesseract OCR | Unit | `tests/test_ocr.py::test_extract_digits` | TODO |
-| FR-9.2 | OCR config file | Unit | `tests/test_config.py::test_score_roi_config` | TODO |
-| FR-9.3 | OCR preprocessing | Unit | `tests/test_ocr.py::test_preprocessing` | TODO |
-| FR-9.4 | OCR fallback | Unit | `tests/test_ocr.py::test_fallback` | TODO |
-| FR-10.1 | Launch PPSSPP | Manual | User verification | TODO |
-| FR-10.2 | Path configuration | Unit | `tests/test_config.py::test_paths_config` | TODO |
+| FR-1.1 | Foreground capture (mss) | Integration (Real) | Manual smoke | MANUAL |
+| FR-1.2 | Background capture (PrintWindow) | Integration (Real) | `--diagnose-capture` | MANUAL |
+| FR-1.3 | Capture region from config | Unit | `conftest.py` fixture | ✅ PASS |
+| FR-1.4 | BGR numpy output | Unit | `tests/test_preprocess.py` | ✅ PASS |
+| FR-2.1 | Calibrate capture GUI | Manual | AC-1.1 | MANUAL |
+| FR-2.2 | Calibrate score GUI | Manual | AC-1.2 | MANUAL |
+| FR-2.3 | GUI live preview | Manual | AC-1.1 | MANUAL |
+| FR-2.4 | 84×84 preview | Manual | AC-1.1 | MANUAL |
+| FR-2.5 | No keyboard interference | Manual | AC-1.1 | MANUAL |
+| FR-3.1 | Action key control | Integration (Fake) | `tests/test_env.py::TestInputControl` | ✅ PASS |
+| FR-3.2 | Reset keys | Integration (Fake) | `tests/test_env.py` (via reset flow) | ✅ PASS |
+| FR-3.3 | Focus before input | Integration (Fake) | `tests/test_env.py` | ✅ PASS |
+| FR-3.4 | Hold mode | Integration (Fake) | `tests/test_env.py::test_action_1_sends_key_down` | ✅ PASS |
+| FR-3.5 | Tap mode | Integration (Fake) | Not yet implemented | TODO |
+| FR-4.1 | Grayscale conversion | Unit | `tests/test_preprocess.py::test_grayscale_conversion` | ✅ PASS |
+| FR-4.2 | Resize to 84×84 | Unit | `tests/test_preprocess.py::test_resize_to_84x84` | ✅ PASS |
+| FR-4.3 | Frame stacking | Unit | `tests/test_env.py::TestFrameStacking` | ✅ PASS |
+| FR-4.4 | Dtype uint8 | Unit | `tests/test_env.py::test_observation_dtype` | ✅ PASS |
+| FR-5.1 | OCR delta reward | Unit | Manual smoke | MANUAL |
+| FR-5.2 | Fallback reward | Unit | `tests/test_env.py::test_default_reward_without_ocr` | ✅ PASS |
+| FR-5.3 | Game-over penalty | Unit | `tests/test_env.py::test_gameover_penalty` | ✅ PASS |
+| FR-6.1 | Template matching done | Unit | `tests/test_done.py::TestDoneDetectorTemplate` | ✅ PASS |
+| FR-6.2 | Motion-based done | Unit | `tests/test_done.py::TestDoneDetectorMotion` | ✅ PASS |
+| FR-6.3 | Detection toggles | Unit | `tests/test_done.py::TestDoneDetectorToggles` | ✅ PASS |
+| FR-7.1 | Training starts | Integration (Fake) | Manual smoke | MANUAL |
+| FR-7.2 | Checkpoint saving | Manual | AC-3.1 | MANUAL |
+| FR-7.3 | Resume training | Manual | AC-3.2 | MANUAL |
+| FR-7.4 | W&B integration | Manual | Optional | MANUAL |
+| FR-7.5 | TensorBoard logs | Manual | AC-3.1 | MANUAL |
+| FR-8.1 | Evaluation mode | Manual | AC-4 | MANUAL |
+| FR-8.2 | Episode rewards | Manual | AC-4 | MANUAL |
+| FR-8.3 | Average reward | Manual | AC-4 | MANUAL |
+| FR-9.1 | Tesseract OCR | Unit | Manual smoke | MANUAL |
+| FR-9.2 | OCR config file | Unit | `conftest.py` fixture | ✅ PASS |
+| FR-9.3 | OCR preprocessing | Unit | Manual smoke | MANUAL |
+| FR-9.4 | OCR fallback | Unit | `tests/test_env.py` | ✅ PASS |
+| FR-10.1 | Launch PPSSPP | Manual | User verification | MANUAL |
+| FR-10.2 | Path configuration | Unit | `conftest.py` fixture | ✅ PASS |
 
 ### Non-Functional Requirements
 
 | Req ID | Requirement | Test Type | Test File/Location | Status |
 |--------|-------------|-----------|--------------------|-|
-| NFR-1.1 | Capture at agent_hz | Integration (Real) | `tests/test_perf.py::test_capture_fps` | TODO |
-| NFR-1.2 | Step latency | Integration (Fake) | `tests/test_perf.py::test_step_latency` | TODO |
-| NFR-2.1 | Window not found error | Unit | `tests/test_window.py::test_window_not_found` | TODO |
-| NFR-2.2 | OCR failure recovery | Unit | `tests/test_ocr.py::test_failure_recovery` | TODO |
-| NFR-3.1 | Keys released on close | Integration (Fake) | `tests/test_cleanup.py::test_close_releases_keys` | TODO |
-| NFR-3.2 | Keys released on done | Integration (Fake) | `tests/test_cleanup.py::test_done_releases_keys` | TODO |
-| NFR-3.3 | atexit cleanup | Integration (Fake) | `tests/test_cleanup.py::test_atexit_registered` | TODO |
-| NFR-4.1 | TensorBoard logging | Manual | AC-3.1 | TODO |
-| NFR-4.2 | Console output | Manual | AC-3.1 | TODO |
+| NFR-1.1 | Capture at agent_hz | Integration (Real) | `--diagnose-capture` | MANUAL |
+| NFR-1.2 | Step latency | Integration (Fake) | Not yet implemented | TODO |
+| NFR-2.1 | Window not found error | Unit | Implemented in code, no test | TODO |
+| NFR-2.2 | OCR failure recovery | Unit | `tests/test_env.py` | ✅ PASS |
+| NFR-3.1 | Keys released on close | Integration (Fake) | `tests/test_env.py::test_close_releases_action_key` | ✅ PASS |
+| NFR-3.2 | Keys released on done | Integration (Fake) | `tests/test_env.py::test_gameover_penalty` | ✅ PASS |
+| NFR-3.3 | atexit cleanup | Integration (Fake) | `tests/test_cleanup.py::test_cleanup_function_exists` | ✅ PASS |
+| NFR-4.1 | TensorBoard logging | Manual | AC-3.1 | MANUAL |
+| NFR-4.2 | Console output | Manual | AC-3.1 | MANUAL |
 
 ### Safety Invariants
 
 | Inv ID | Invariant | Test Type | Test File/Location | Status |
 |--------|-----------|-----------|--------------------|-|
-| INV-1 | No stuck keys | Integration (Fake) | `tests/test_invariants.py::test_no_stuck_keys_on_exception` | TODO |
-| INV-2 | No orphan windows | Manual | AC-5 | TODO |
-| INV-3 | Config persistence | Unit | `tests/test_config.py::test_config_persistence` | TODO |
-| INV-4 | Gymnasium API | Integration (Fake) | `tests/test_env.py::test_gymnasium_api` | TODO |
+| INV-1 | No stuck keys | Integration (Fake) | `tests/test_cleanup.py::TestCleanupInvariants` | ✅ PASS |
+| INV-2 | No orphan windows | Manual | AC-5 | MANUAL |
+| INV-3 | Config persistence | Unit | `conftest.py` fixture | ✅ PASS |
+| INV-4 | Gymnasium API | Integration (Fake) | `tests/test_env.py::TestGymnasiumAPI` | ✅ PASS |
 
 ---
 

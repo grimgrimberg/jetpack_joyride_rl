@@ -188,12 +188,13 @@ This document defines acceptance criteria that a human can manually verify.
 
 ### AC-7.2: OCR Disabled
 **Steps**:
-1. Set `--no-ocr` (or disable in config) and run `--play-random`
-   *(Note: this flag may need to be added)*
+1. The config default `use_ocr_reward: False` disables OCR. Run `--play-random`
+   *(Note: CLI flag `--no-ocr` is not yet implemented; use config setting)*
 
 **Expected**:
 - ✅ Training works without OCR
 - ✅ Fallback reward used
+
 
 ---
 
