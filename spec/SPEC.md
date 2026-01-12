@@ -69,6 +69,11 @@ The system SHALL transform raw captures into RL observations.
 - **FR-4.2**: Resize to 84×84 pixels.
 - **FR-4.3**: Stack 4 consecutive frames (channel-first: shape `(4, 84, 84)`).
 - **FR-4.4**: Output dtype is `np.uint8`, values 0–255.
+- **FR-4.5**: MLP Mode (when `--mlp` is set):
+  - Extract structured 17-float feature vector per frame
+  - Features: Barry Y (1), velocity (1), 5 nearest objects × (x, y, type) = 15
+  - Stack 4 frames → 68-float observation space (`Box(-1.0, 1.0, (68,))`)
+  - Use `CachedFeatureExtractor` for speed (detect every 3 frames)
 
 ### FR-5: Reward Shaping
 The system SHALL compute rewards based on game progress.
@@ -170,6 +175,10 @@ Calibration data MUST be persisted to JSON files and loaded on subsequent runs.
 | `--wandb` | flag | - | Enable W&B logging |
 | `--background` | flag | - | Use background capture mode |
 | `--visualize-network` | flag | - | Render CNN architecture diagram |
+| `--mlp` | flag | - | Use MLP policy with structured features (68-float obs) |
+| `--gui` | flag | - | Show training GUI with detection visualization (MLP only) |
+| `--diagnose-capture` | flag | - | Test capture reliability |
+| `--debug-visual` | flag | - | Live visualization of agent's view |
 
 ### Exit Codes
 | Code | Meaning |

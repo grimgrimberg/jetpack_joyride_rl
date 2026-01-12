@@ -17,19 +17,20 @@ This document traces each requirement from SPEC.md to its implementation and tes
 | FR-2.5 | No keyboard interference | CalibrationGUI uses only mouse events | Manual: AC-1.1 | ✅ |
 | FR-3.1 | Action key control | `JetpackPPSSPPEnv._apply_action()` L573-606 | `test_env.py::TestInputControl` | ✅ |
 | FR-3.4 | Hold mode | `JetpackPPSSPPEnv._apply_action()` L582-598 | `test_env.py::test_action_1_sends_key_down` | ✅ |
-| FR-4.1 | Grayscale conversion | `preprocess_frame()` L343-347 | `test_preprocess.py::test_grayscale_conversion` | ✅ |
-| FR-4.2 | Resize to 84x84 | `preprocess_frame()` L346 | `test_preprocess.py::test_resize_to_84x84` | ✅ |
-| FR-4.3 | Frame stacking | `JetpackPPSSPPEnv._stack_obs()` L569-571 | `test_env.py::TestFrameStacking` | ✅ |
-| FR-4.4 | Dtype uint8 | `observation_space` definition L511-514 | `test_env.py::test_observation_dtype` | ✅ |
-| FR-5.1 | OCR delta reward | `step()` L656-670 | Tested via manual smoke | ✅ |
-| FR-5.2 | Fallback reward | `step()` L653 | `test_env.py::test_default_reward_without_ocr` | ✅ |
-| FR-5.3 | Game-over penalty | `step()` L675 | `test_env.py::test_gameover_penalty` | ✅ |
-| FR-6.1 | Template matching done | `DoneDetector.is_done()` L436-441 | `test_done.py::TestDoneDetectorTemplate` | ✅ |
-| FR-6.2 | Motion-based done | `DoneDetector.is_done()` L443-458 | `test_done.py::TestDoneDetectorMotion` | ✅ |
+| FR-4.1 | Grayscale conversion | `preprocess_frame()` | `test_preprocess.py::test_grayscale_conversion` | ✅ |
+| FR-4.2 | Resize to 84x84 | `preprocess_frame()` | `test_preprocess.py::test_resize_to_84x84` | ✅ |
+| FR-4.3 | Frame stacking | `JetpackPPSSPPEnv._stack_obs()` | `test_env.py::TestFrameStacking` | ✅ |
+| FR-4.4 | Dtype uint8 | `observation_space` definition | `test_env.py::test_observation_dtype` | ✅ |
+| FR-4.5 | MLP observation mode | `FeatureExtractor`, `CachedFeatureExtractor`, `JetpackMLPEnv` | TODO: test_mlp_env.py | 🔲 |
+| FR-5.1 | OCR delta reward | `step()` reward logic | Tested via manual smoke | ✅ |
+| FR-5.2 | Fallback reward | `step()` fallback | `test_env.py::test_default_reward_without_ocr` | ✅ |
+| FR-5.3 | Game-over penalty | `step()` game-over | `test_env.py::test_gameover_penalty` | ✅ |
+| FR-6.1 | Template matching done | `DoneDetector.is_done()` | `test_done.py::TestDoneDetectorTemplate` | ✅ |
+| FR-6.2 | Motion-based done | `DoneDetector.is_done()` | `test_done.py::TestDoneDetectorMotion` | ✅ |
 | FR-6.3 | Detection toggles | `DoneDetector` config flags | `test_done.py::TestDoneDetectorToggles` | ✅ |
-| FR-7.1 | Training starts | `train_ppo()` L1233-1302 | Manual: AC-3.1 | ✅ |
-| FR-8.1 | Evaluation mode | `evaluate()` L1305-1414 | Manual: AC-4 | ✅ |
-| FR-9.1 | OCR extraction | `ScoreExtractor.extract()` L363-401 | Manual smoke | ✅ |
+| FR-7.1 | Training starts | `train_ppo()` | Manual: AC-3.1 | ✅ |
+| FR-8.1 | Evaluation mode | `evaluate()` | Manual: AC-4 | ✅ |
+| FR-9.1 | OCR extraction | `ScoreExtractor.extract()` | Manual smoke | ✅ |
 
 ---
 
