@@ -603,24 +603,51 @@ class FeatureExtractor:
     
     def extract(self, frame_bgr: np.ndarray) -> np.ndarray:
         """Extract normalized 17-float feature vector from frame."""
-        barry_y = self._detect_barry_y(frame_bgr)
+        barry_x, barry_y = self._detect_barry(frame_bgr)
+        self.last_barry_x = barry_x  # Store for GUI
         velocity = self._calc_velocity(barry_y)
         self.prev_barry_y = barry_y
         objects = self._detect_all_objects(frame_bgr, barry_y)
         return self._build_vector(barry_y, velocity, objects)
     
+    def _detect_barry(self, frame_bgr: np.ndarray) -> Tuple[float, float]:
+        """Detect Barry's position. Returns (x, y)."""
+        # Barry is always in the left third of the screen
+        search_region = frame_bgr[:, :self.frame_w // 3]
+        
+        if self.barry_face is not None:
+            try:
+                result = cv2.matchTemplate(search_region, self.barry_face, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                if max_val >= self.BARRY_THRESHOLD:
+                    x = max_loc[0] + self.barry_face.shape[1] / 2
+                    y = max_loc[1] + self.barry_face.shape[0] / 2
+                    return (x, y)
+            except cv2.error:
+                pass
+        
+        # Fallback: color-based detection (Barry's skin/jetpack colors)
+        # Look for bright orange-ish pixels in left region
+        hsv = cv2.cvtColor(search_region, cv2.COLOR_BGR2HSV)
+        # Skin tone range
+        mask = cv2.inRange(hsv, (5, 50, 100), (20, 200, 255))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest) > 100:  # Minimum size
+                M = cv2.moments(largest)
+                if M["m00"] > 0:
+                    x = M["m10"] / M["m00"]
+                    y = M["m01"] / M["m00"]
+                    return (x, y)
+        
+        # Return previous position if detection fails
+        return (getattr(self, 'last_barry_x', 70), self.prev_barry_y)
+    
     def _detect_barry_y(self, frame_bgr: np.ndarray) -> float:
-        """Detect Barry's Y position using face template."""
-        if self.barry_face is None:
-            return self.prev_barry_y
-        try:
-            result = cv2.matchTemplate(frame_bgr, self.barry_face, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(result)
-            if max_val >= self.BARRY_THRESHOLD:
-                return max_loc[1] + self.barry_face.shape[0] / 2
-        except cv2.error:
-            pass
-        return self.prev_barry_y
+        """Detect Barry's Y position (legacy wrapper)."""
+        _, y = self._detect_barry(frame_bgr)
+        return y
     
     def _calc_velocity(self, current_y: float) -> float:
         """Calculate velocity from frame-to-frame Y delta."""
@@ -749,18 +776,23 @@ class CachedFeatureExtractor(FeatureExtractor):
         
         # Full detection every N frames
         if self.frame_count % self.detect_every_n == 0:
-            barry_y = self._detect_barry_y(frame_bgr)
+            barry_x, barry_y = self._detect_barry(frame_bgr)
             objects = self._detect_all_objects(frame_bgr, barry_y)
             self.cached_barry_y = barry_y
+            self.cached_barry_x = barry_x
             self.cached_objects = objects
+            self.last_barry_x = barry_x  # For GUI
             self.last_detections = {
                 'barry': barry_y,
+                'barry_x': barry_x,
                 'objects': objects.copy(),
                 'frame': frame_bgr.copy() if frame_bgr is not None else None
             }
         else:
             # Use cached with interpolation
             barry_y = self.cached_barry_y
+            barry_x = getattr(self, 'cached_barry_x', 70)
+
             objects = self._interpolate_objects()
         
         velocity = self._calc_velocity(barry_y)
@@ -885,7 +917,7 @@ class TrainingVisualizerGUI:
         # Draw Barry position
         if detections.get('barry') is not None:
             barry_y = int(detections['barry'])
-            barry_x = 80  # Barry is roughly at fixed X
+            barry_x = int(detections.get('barry_x', 70))  # Use detected X position
             cv2.circle(display_frame, (barry_x, barry_y), 15, (0, 255, 0), 2)  # Green circle
             cv2.putText(display_frame, "Barry", (barry_x - 20, barry_y - 20), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
