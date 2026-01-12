@@ -1484,12 +1484,14 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
             self._fps_counter = 0
             self._fps_time = now
         
-        # Extract features from last frame
-        if self._last_frame is not None:
-            features = self.feature_extractor.extract(self._last_frame)
+        # Grab fresh raw frame for feature extraction and GUI
+        raw_frame = self.cap.grab()
+        
+        if raw_frame is not None:
+            features = self.feature_extractor.extract(raw_frame)
             self.feature_frames.append(features)
             
-            # Update GUI if enabled
+            # Update GUI if enabled (pass raw color frame, not preprocessed)
             if self.use_gui and self.gui:
                 avg_reward = sum(self.episode_rewards_history[-10:]) / max(1, len(self.episode_rewards_history[-10:]))
                 stats = {
@@ -1502,7 +1504,7 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
                     "Game State": self._last_state.name if self._last_state else "UNKNOWN"
                 }
                 detections = self.feature_extractor.get_last_detections()
-                self.gui.update(self._last_frame, detections, stats)
+                self.gui.update(raw_frame, detections, stats)
                 
                 if self.gui.is_stopped():
                     done = True
@@ -1510,6 +1512,7 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
                     info['stopped_by_gui'] = True
         
         return self._stack_features(), reward, done, truncated, info
+
     
     def close(self):
         """Clean up resources."""
