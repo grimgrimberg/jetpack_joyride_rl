@@ -727,6 +727,217 @@ class FeatureExtractor:
         self.prev_features = None
 
 
+class CachedFeatureExtractor(FeatureExtractor):
+    """Feature extractor with caching for faster training.
+    
+    Only runs full template matching every N frames.
+    Interpolates object positions in between.
+    """
+    
+    def __init__(self, templates_dir: str = "templates/", frame_w: int = 480, frame_h: int = 272,
+                 detect_every_n: int = 3):
+        super().__init__(templates_dir, frame_w, frame_h)
+        self.detect_every_n = detect_every_n
+        self.frame_count = 0
+        self.cached_objects = []
+        self.cached_barry_y = frame_h / 2
+        self.last_detections = {'barry': None, 'objects': [], 'confidence': {}}
+    
+    def extract(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Extract features with caching."""
+        self.frame_count += 1
+        
+        # Full detection every N frames
+        if self.frame_count % self.detect_every_n == 0:
+            barry_y = self._detect_barry_y(frame_bgr)
+            objects = self._detect_all_objects(frame_bgr, barry_y)
+            self.cached_barry_y = barry_y
+            self.cached_objects = objects
+            self.last_detections = {
+                'barry': barry_y,
+                'objects': objects.copy(),
+                'frame': frame_bgr.copy() if frame_bgr is not None else None
+            }
+        else:
+            # Use cached with interpolation
+            barry_y = self.cached_barry_y
+            objects = self._interpolate_objects()
+        
+        velocity = self._calc_velocity(barry_y)
+        self.prev_barry_y = barry_y
+        
+        return self._build_vector(barry_y, velocity, objects)
+    
+    def _interpolate_objects(self) -> list:
+        """Interpolate object positions (objects move left)."""
+        interpolated = []
+        scroll_speed = 5  # pixels per frame estimate
+        
+        for obj in self.cached_objects:
+            new_obj = obj.copy()
+            new_obj['x'] = max(0, obj['x'] - scroll_speed)  # Objects scroll left
+            if new_obj['x'] > 0:  # Only keep if still on screen
+                interpolated.append(new_obj)
+        
+        # Update cache with interpolated positions
+        self.cached_objects = interpolated
+        return interpolated
+    
+    def get_last_detections(self) -> dict:
+        """Get last detection results for visualization."""
+        return self.last_detections
+    
+    def reset(self):
+        """Reset state for new episode."""
+        super().reset()
+        self.frame_count = 0
+        self.cached_objects = []
+        self.cached_barry_y = self.frame_h / 2
+
+
+class TrainingVisualizerGUI:
+    """Tkinter GUI for visualizing training in real-time.
+    
+    Shows:
+    - Game frame with detection overlays
+    - Barry position marked
+    - Objects with colored boxes
+    - Episode statistics
+    """
+    
+    def __init__(self, title: str = "Jetpack RL Training Monitor"):
+        self.root = tk.Tk()
+        self.root.title(title)
+        self.root.geometry("900x500")
+        
+        # Main frame
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.grid(row=0, column=0, sticky="nsew")
+        
+        # Left panel - game view
+        self.game_frame = ttk.LabelFrame(self.main_frame, text="Game View", padding="5")
+        self.game_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        
+        self.canvas = tk.Canvas(self.game_frame, width=480, height=272, bg="black")
+        self.canvas.pack()
+        
+        # Detection info below canvas
+        self.detection_label = ttk.Label(self.game_frame, text="Detection: -", font=("Consolas", 9))
+        self.detection_label.pack(pady=5)
+        
+        # Right panel - stats
+        self.stats_frame = ttk.LabelFrame(self.main_frame, text="Training Stats", padding="10")
+        self.stats_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        
+        # Stats labels
+        self.stats_labels = {}
+        stats = ["Episode", "Total Steps", "Episode Steps", "Episode Reward", 
+                 "Avg Reward", "FPS", "Game State"]
+        for i, stat in enumerate(stats):
+            ttk.Label(self.stats_frame, text=f"{stat}:", font=("Arial", 10, "bold")).grid(
+                row=i, column=0, sticky="w", pady=2)
+            self.stats_labels[stat] = ttk.Label(self.stats_frame, text="-", font=("Arial", 10))
+            self.stats_labels[stat].grid(row=i, column=1, sticky="w", padx=10, pady=2)
+        
+        # Control buttons
+        self.control_frame = ttk.Frame(self.main_frame)
+        self.control_frame.grid(row=1, column=0, columnspan=2, pady=10)
+        
+        self.paused = False
+        self.stopped = False
+        
+        self.pause_btn = ttk.Button(self.control_frame, text="Pause", command=self._toggle_pause)
+        self.pause_btn.pack(side="left", padx=5)
+        
+        self.stop_btn = ttk.Button(self.control_frame, text="Stop", command=self._stop)
+        self.stop_btn.pack(side="left", padx=5)
+        
+        # Configure grid weights
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        self.main_frame.columnconfigure(0, weight=2)
+        self.main_frame.columnconfigure(1, weight=1)
+        
+        self._photo = None
+        self._last_update = time.time()
+    
+    def _toggle_pause(self):
+        self.paused = not self.paused
+        self.pause_btn.config(text="Resume" if self.paused else "Pause")
+    
+    def _stop(self):
+        self.stopped = True
+    
+    def update(self, frame_bgr: np.ndarray, detections: dict, stats: dict):
+        """Update GUI with new frame and stats."""
+        if self.stopped:
+            return
+        
+        # Throttle updates to ~10 FPS for GUI responsiveness
+        now = time.time()
+        if now - self._last_update < 0.1:
+            return
+        self._last_update = now
+        
+        # Draw frame with overlays
+        display_frame = frame_bgr.copy() if frame_bgr is not None else np.zeros((272, 480, 3), dtype=np.uint8)
+        
+        # Draw Barry position
+        if detections.get('barry') is not None:
+            barry_y = int(detections['barry'])
+            barry_x = 80  # Barry is roughly at fixed X
+            cv2.circle(display_frame, (barry_x, barry_y), 15, (0, 255, 0), 2)  # Green circle
+            cv2.putText(display_frame, "Barry", (barry_x - 20, barry_y - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        
+        # Draw objects
+        colors = {1: (0, 215, 255), 2: (0, 0, 255), 3: (0, 165, 255)}  # Coin=gold, Zapper=red, Missile=orange
+        names = {1: "Coin", 2: "Zap", 3: "Mis"}
+        
+        for obj in detections.get('objects', []):
+            x, y = int(obj['x']), int(obj['y'])
+            obj_type = obj.get('type', 0)
+            color = colors.get(obj_type, (255, 255, 255))
+            name = names.get(obj_type, "?")
+            cv2.rectangle(display_frame, (x-15, y-15), (x+15, y+15), color, 2)
+            cv2.putText(display_frame, name, (x-10, y-20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+        
+        # Convert to PhotoImage
+        rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb_frame)
+        self._photo = ImageTk.PhotoImage(pil_img)
+        
+        # Update canvas
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
+        
+        # Update detection label
+        barry_str = f"Barry Y: {detections.get('barry', 0):.1f}" if detections.get('barry') else "Barry: -"
+        obj_count = len(detections.get('objects', []))
+        self.detection_label.config(text=f"{barry_str} | Objects: {obj_count}")
+        
+        # Update stats
+        for key, value in stats.items():
+            if key in self.stats_labels:
+                self.stats_labels[key].config(text=str(value))
+        
+        # Process Tkinter events
+        self.root.update_idletasks()
+        self.root.update()
+    
+    def is_stopped(self) -> bool:
+        return self.stopped
+    
+    def is_paused(self) -> bool:
+        return self.paused
+    
+    def close(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+
 # =========================
 # Custom Callbacks
 # =========================
@@ -1126,23 +1337,32 @@ class JetpackPPSSPPEnv(gym.Env):
 class JetpackMLPEnv(JetpackPPSSPPEnv):
     """MLP-based environment using structured feature observations.
     
-    Uses FeatureExtractor to convert raw frames to 17-float vectors:
+    Uses CachedFeatureExtractor for faster training:
+    - Full detection every 3 frames, interpolates between
     - Barry Y position and velocity
     - 5 nearest objects (x, y, type each)
     
     With 4-frame stacking: 68-float observation space.
+    
+    Optional GUI visualization via TrainingVisualizerGUI.
     """
     
+    # Minimum steps before allowing episode to end
+    MIN_GAMEPLAY_STEPS = 30  # ~2 seconds at 15Hz
+    
     def __init__(self, cfg: dict, render_mode: str = None,
-                 capture_backend=None, input_backend=None, window_backend=None):
+                 capture_backend=None, input_backend=None, window_backend=None,
+                 use_gui: bool = False):
         # Initialize parent (CNN-based env)
         super().__init__(cfg, render_mode, capture_backend, input_backend, window_backend)
         
-        # Override observation space for MLP
-        self.feature_extractor = FeatureExtractor(
+        # Use cached feature extractor for speed
+        detect_every_n = cfg.get("detect_every_n", 3)
+        self.feature_extractor = CachedFeatureExtractor(
             templates_dir=cfg.get("templates_dir", "templates/"),
             frame_w=cfg["cap_w"],
-            frame_h=cfg["cap_h"]
+            frame_h=cfg["cap_h"],
+            detect_every_n=detect_every_n
         )
         
         # 17 features × 4 stacked frames = 68
@@ -1155,6 +1375,26 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
             shape=(17 * self.feature_stack_n,),
             dtype=np.float32
         )
+        
+        # GUI visualization
+        self.use_gui = use_gui
+        self.gui = None
+        if use_gui:
+            try:
+                self.gui = TrainingVisualizerGUI()
+            except Exception as e:
+                print(f"[Warning] Could not initialize GUI: {e}")
+                self.use_gui = False
+        
+        # Episode tracking for improved stats
+        self.episode_count = 0
+        self.total_steps = 0
+        self.episode_steps = 0
+        self.episode_reward = 0.0
+        self.episode_rewards_history = []
+        self._fps_counter = 0
+        self._fps_time = time.time()
+        self._current_fps = 0.0
     
     def _stack_features(self) -> np.ndarray:
         """Stack feature vectors into flat observation."""
@@ -1163,11 +1403,20 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
     
     def reset(self, seed=None, options=None):
         """Reset and return feature-based observation."""
+        # Track episode completion
+        if self.episode_steps > 0:
+            self.episode_rewards_history.append(self.episode_reward)
+            self.episode_count += 1
+        
         # Use parent reset for navigation
         super().reset(seed=seed, options=options)
         
         self.feature_extractor.reset()
         self.feature_frames.clear()
+        
+        # Reset episode tracking
+        self.episode_steps = 0
+        self.episode_reward = 0.0
         
         # Get initial frame and extract features
         frame = self._last_frame
@@ -1185,12 +1434,56 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
         # Use parent step (handles input, timing, done detection)
         _, reward, done, truncated, info = super().step(action)
         
+        # Episode must have minimum steps before allowing DONE
+        if done and self.episode_steps < self.MIN_GAMEPLAY_STEPS:
+            done = False
+            info['done_blocked'] = f"Need {self.MIN_GAMEPLAY_STEPS - self.episode_steps} more steps"
+        
+        # Update tracking
+        self.episode_steps += 1
+        self.total_steps += 1
+        self.episode_reward += reward
+        
+        # Calculate FPS
+        self._fps_counter += 1
+        now = time.time()
+        if now - self._fps_time >= 1.0:
+            self._current_fps = self._fps_counter / (now - self._fps_time)
+            self._fps_counter = 0
+            self._fps_time = now
+        
         # Extract features from last frame
         if self._last_frame is not None:
             features = self.feature_extractor.extract(self._last_frame)
             self.feature_frames.append(features)
+            
+            # Update GUI if enabled
+            if self.use_gui and self.gui:
+                avg_reward = sum(self.episode_rewards_history[-10:]) / max(1, len(self.episode_rewards_history[-10:]))
+                stats = {
+                    "Episode": self.episode_count + 1,
+                    "Total Steps": self.total_steps,
+                    "Episode Steps": self.episode_steps,
+                    "Episode Reward": f"{self.episode_reward:.1f}",
+                    "Avg Reward": f"{avg_reward:.1f}" if self.episode_rewards_history else "-",
+                    "FPS": f"{self._current_fps:.1f}",
+                    "Game State": self._last_state.name if self._last_state else "UNKNOWN"
+                }
+                detections = self.feature_extractor.get_last_detections()
+                self.gui.update(self._last_frame, detections, stats)
+                
+                if self.gui.is_stopped():
+                    done = True
+                    truncated = True
+                    info['stopped_by_gui'] = True
         
         return self._stack_features(), reward, done, truncated, info
+    
+    def close(self):
+        """Clean up resources."""
+        if self.gui:
+            self.gui.close()
+        super().close()
 
 
 # =========================
@@ -1915,7 +2208,7 @@ def visualize_network(cfg: dict):
     env.close()
 
 
-def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb: bool = False, use_mlp: bool = False):
+def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb: bool = False, use_mlp: bool = False, use_gui: bool = False):
     """Train PPO agent.
     
     Args:
@@ -1924,6 +2217,7 @@ def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb:
         resume: Path to checkpoint to resume from
         use_wandb: Enable Weights & Biases logging
         use_mlp: Use MLP policy with structured features instead of CNN
+        use_gui: Show training GUI with detection visualization (MLP only)
     """
     global _env_global
 
@@ -1933,13 +2227,17 @@ def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb:
 
     # Create environment (MLP or CNN)
     if use_mlp:
-        print("[MLP Mode] Using structured features with FeatureExtractor")
-        env = DummyVecEnv([lambda: JetpackMLPEnv(cfg)])
+        print("[MLP Mode] Using structured features with CachedFeatureExtractor")
+        if use_gui:
+            print("[GUI Mode] Training visualization enabled")
+        env = DummyVecEnv([lambda: JetpackMLPEnv(cfg, use_gui=use_gui)])
         policy_name = "MlpPolicy"
         policy_kwargs = dict(
             net_arch=[128, 128],  # 2 hidden layers, 128 units each
         )
     else:
+        if use_gui:
+            print("[Warning] --gui flag only works with --mlp mode")
         print("[CNN Mode] Using raw pixels with CnnPolicy")
         env = DummyVecEnv([lambda: JetpackPPSSPPEnv(cfg)])
         policy_name = "CnnPolicy"
@@ -2065,7 +2363,7 @@ def main():
     parser.add_argument("--wandb", action="store_true", help="Enable W&B logging")
     parser.add_argument("--background", action="store_true", help="Use background capture (no focus needed)")
     parser.add_argument("--mlp", action="store_true", help="Use MLP policy with structured features (instead of CNN)")
-
+    parser.add_argument("--gui", action="store_true", help="Show training GUI with detection visualization")
 
     args = parser.parse_args()
 
@@ -2110,7 +2408,7 @@ def main():
         return
 
     if args.train:
-        train_ppo(CONFIG, timesteps=args.timesteps, resume=args.resume, use_wandb=args.wandb, use_mlp=args.mlp)
+        train_ppo(CONFIG, timesteps=args.timesteps, resume=args.resume, use_wandb=args.wandb, use_mlp=args.mlp, use_gui=args.gui)
         return
 
     if args.eval:
