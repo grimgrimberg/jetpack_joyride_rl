@@ -561,11 +561,17 @@ class FeatureExtractor:
         self.prev_barry_y = frame_h / 2  # Start at center
         self.prev_features = None
         
-        # Load templates
-        self.barry_face = self._load_template("barry_face.png")
-        self.coin = self._load_template("coin2.png")
-        self.electrode = self._load_template("electrode.png")
-        self.missile = self._load_template("Missile_Unbroken.jpeg")
+        # Performance: scale factor for faster template matching
+        # 0.25 = 4x smaller = ~16x faster matching
+        self.FAST_SCALE = 0.25
+        self.fast_w = int(frame_w * self.FAST_SCALE)
+        self.fast_h = int(frame_h * self.FAST_SCALE)
+        
+        # Load and resize templates for fast matching
+        self.barry_face = self._load_and_resize_template("barry_face.png")
+        self.coin = self._load_and_resize_template("coin2.png")
+        self.electrode = self._load_and_resize_template("electrode.png")
+        self.missile = self._load_and_resize_template("Missile_Unbroken.jpeg")
         
         # Fallback: create electrode template from zapper if not found
         if self.electrode is None:
@@ -584,12 +590,26 @@ class FeatureExtractor:
                 return img
         return None
     
+    def _load_and_resize_template(self, filename: str) -> Optional[np.ndarray]:
+        """Load template and resize for fast matching."""
+        img = self._load_template(filename)
+        if img is not None:
+            h, w = img.shape[:2]
+            new_w = max(8, int(w * self.FAST_SCALE))
+            new_h = max(8, int(h * self.FAST_SCALE))
+            return cv2.resize(img, (new_w, new_h))
+        return None
+    
     def _create_electrode_template(self):
         """Create electrode template by cropping from zap.png."""
         zap = self._load_template("zap.png")
         if zap is not None:
             h, w = zap.shape[:2]
-            self.electrode = zap[:, :w//4].copy()
+            crop = zap[:, :w//4].copy()
+            # Resize for fast matching
+            new_w = max(8, int(crop.shape[1] * self.FAST_SCALE))
+            new_h = max(8, int(crop.shape[0] * self.FAST_SCALE))
+            self.electrode = cv2.resize(crop, (new_w, new_h))
             print(f"[FeatureExtractor] Created electrode template: {self.electrode.shape[:2]}")
     
     def _create_face_template(self):
@@ -598,22 +618,34 @@ class FeatureExtractor:
         if fly is not None:
             h, w = fly.shape[:2]
             face_h, face_w = min(40, h//2), min(30, w//3)
-            self.barry_face = fly[:face_h, w//2:w//2+face_w].copy()
+            crop = fly[:face_h, w//2:w//2+face_w].copy()
+            # Resize for fast matching
+            new_w = max(8, int(face_w * self.FAST_SCALE))
+            new_h = max(8, int(face_h * self.FAST_SCALE))
+            self.barry_face = cv2.resize(crop, (new_w, new_h))
             print(f"[FeatureExtractor] Created face template: {self.barry_face.shape[:2]}")
     
     def extract(self, frame_bgr: np.ndarray) -> np.ndarray:
         """Extract normalized 17-float feature vector from frame."""
-        barry_x, barry_y = self._detect_barry(frame_bgr)
+        # PERFORMANCE: Resize frame once for all template matching
+        self._small_frame = cv2.resize(frame_bgr, (self.fast_w, self.fast_h))
+        
+        barry_x, barry_y = self._detect_barry(self._small_frame)
+        # Scale back to original coordinates
+        barry_x = barry_x / self.FAST_SCALE
+        barry_y = barry_y / self.FAST_SCALE
         self.last_barry_x = barry_x  # Store for GUI
         velocity = self._calc_velocity(barry_y)
         self.prev_barry_y = barry_y
-        objects = self._detect_all_objects(frame_bgr, barry_y)
+        objects = self._detect_all_objects(self._small_frame, barry_y * self.FAST_SCALE)
+
         return self._build_vector(barry_y, velocity, objects)
     
     def _detect_barry(self, frame_bgr: np.ndarray) -> Tuple[float, float]:
-        """Detect Barry's position. Returns (x, y)."""
-        # Barry is always in the left third of the screen
-        search_region = frame_bgr[:, :self.frame_w // 3]
+        """Detect Barry's position. Returns (x, y) in scaled coordinates."""
+        # Barry is always in the left third of the screen (use scaled dimensions)
+        search_w = frame_bgr.shape[1] // 3
+        search_region = frame_bgr[:, :search_w]
         
         if self.barry_face is not None:
             try:
@@ -861,15 +893,16 @@ class TrainingVisualizerGUI:
         self.stats_frame = ttk.LabelFrame(self.main_frame, text="Training Stats", padding="10")
         self.stats_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         
-        # Stats labels
+        # Stats labels - including debug stats for state detection
         self.stats_labels = {}
         stats = ["Episode", "Total Steps", "Episode Steps", "Episode Reward", 
-                 "Avg Reward", "FPS", "Game State"]
+                 "Avg Reward", "FPS", "Game State", "Pixel Mean", "Pixel Std", "State Reason"]
         for i, stat in enumerate(stats):
             ttk.Label(self.stats_frame, text=f"{stat}:", font=("Arial", 10, "bold")).grid(
                 row=i, column=0, sticky="w", pady=2)
             self.stats_labels[stat] = ttk.Label(self.stats_frame, text="-", font=("Arial", 10))
             self.stats_labels[stat].grid(row=i, column=1, sticky="w", padx=10, pady=2)
+
         
         # Control buttons
         self.control_frame = ttk.Frame(self.main_frame)
@@ -905,14 +938,18 @@ class TrainingVisualizerGUI:
         if self.stopped:
             return
         
-        # Throttle updates to ~10 FPS for GUI responsiveness
+        # PERFORMANCE: Throttle updates to ~5 FPS (every 200ms)
         now = time.time()
-        if now - self._last_update < 0.1:
+        if now - self._last_update < 0.2:
             return
         self._last_update = now
         
-        # Draw frame with overlays
-        display_frame = frame_bgr.copy() if frame_bgr is not None else np.zeros((272, 480, 3), dtype=np.uint8)
+        # Convert to grayscale for performance display
+        if frame_bgr is not None:
+            gray_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            display_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)  # Back to BGR for drawing
+        else:
+            display_frame = np.zeros((272, 480, 3), dtype=np.uint8)
         
         # Draw Barry position
         if detections.get('barry') is not None:
@@ -936,6 +973,7 @@ class TrainingVisualizerGUI:
         
         # Convert to PhotoImage
         rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+
         pil_img = Image.fromarray(rgb_frame)
         self._photo = ImageTk.PhotoImage(pil_img)
         
@@ -1294,13 +1332,15 @@ class JetpackPPSSPPEnv(gym.Env):
                     print("[Step] DONE by motion/template detector")
 
                 # Method 2: GameState detection (more reliable for death)
-                # If we're no longer in GAMEPLAY, Barry died
+                # ONLY end on death states (RESULTS, SAVE_DIALOG)
+                # LOADING is restart transition - don't end episode there
                 confirm_frames = self.cfg.get("game_state_done_confirm_frames", 1)
-                if game_state in (GameState.RESULTS, GameState.SAVE_DIALOG, GameState.LOADING):
+                if game_state in (GameState.RESULTS, GameState.SAVE_DIALOG):
                     if enough_steps and self._non_gameplay_frames >= confirm_frames:
                         done = True
-                        done_reason = done_reason or f"game_state_{game_state.name.lower()}"
-                        print(f"[Step] DONE by GameState={game_state.name}, mean={float(proc.mean()):.1f}")
+                        done_reason = done_reason or f"death_{game_state.name.lower()}"
+                        print(f"[Step] DONE by death: {game_state.name}, mean={float(proc.mean()):.1f}")
+
 
             if done:
                 reward = -10.0  # Death penalty (reduced from -100 for better learning)
@@ -1310,6 +1350,7 @@ class JetpackPPSSPPEnv(gym.Env):
             self._last_reward = reward
             self._last_done_reason = done_reason
             self._last_state = game_state
+            self._last_raw_frame = frame_bgr  # PERF: Expose for subclass reuse
 
             info = {
                 "score": self.prev_score,
@@ -1484,16 +1525,34 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
             self._fps_counter = 0
             self._fps_time = now
         
-        # Grab fresh raw frame for feature extraction and GUI
-        raw_frame = self.cap.grab()
+        # PERF: Reuse parent's captured frame instead of recapturing
+        raw_frame = self._last_raw_frame
         
         if raw_frame is not None:
             features = self.feature_extractor.extract(raw_frame)
             self.feature_frames.append(features)
+
             
             # Update GUI if enabled (pass raw color frame, not preprocessed)
             if self.use_gui and self.gui:
                 avg_reward = sum(self.episode_rewards_history[-10:]) / max(1, len(self.episode_rewards_history[-10:]))
+                
+                # DEBUG: Calculate state detection values for visualization
+                gray_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
+                pixel_mean = float(gray_frame.mean())
+                pixel_std = float(gray_frame.std())
+                
+                # Determine why this state was detected
+                state_reason = "Default=GAMEPLAY"
+                if pixel_mean < 25:
+                    state_reason = "mean<25 → LOADING"
+                elif 100 < pixel_mean < 145 and pixel_std < 25:
+                    state_reason = "gray+low_std → SAVE_DIALOG"
+                elif pixel_mean < 70:
+                    bright_ratio = np.sum(gray_frame > 180) / gray_frame.size
+                    if bright_ratio > 0.02:
+                        state_reason = f"dark+text({bright_ratio:.2f}) → RESULTS"
+                
                 stats = {
                     "Episode": self.episode_count + 1,
                     "Total Steps": self.total_steps,
@@ -1501,10 +1560,14 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
                     "Episode Reward": f"{self.episode_reward:.1f}",
                     "Avg Reward": f"{avg_reward:.1f}" if self.episode_rewards_history else "-",
                     "FPS": f"{self._current_fps:.1f}",
-                    "Game State": self._last_state.name if self._last_state else "UNKNOWN"
+                    "Game State": self._last_state.name if self._last_state else "UNKNOWN",
+                    "Pixel Mean": f"{pixel_mean:.1f}",
+                    "Pixel Std": f"{pixel_std:.1f}",
+                    "State Reason": state_reason
                 }
                 detections = self.feature_extractor.get_last_detections()
                 self.gui.update(raw_frame, detections, stats)
+
                 
                 if self.gui.is_stopped():
                     done = True
