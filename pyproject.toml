@@ -24,6 +24,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
+    "black>=23.9.0",
 ]
 all = [
     "pytesseract>=0.3.10",
@@ -33,6 +34,7 @@ all = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
+    "black>=23.9.0",
 ]
 
 [tool.ruff]
@@ -45,6 +47,10 @@ ignore = ["E501"]  # Line too long - handled by formatter
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

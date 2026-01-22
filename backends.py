@@ -5,7 +5,8 @@ This module defines protocols for capture, input, and window operations,
 allowing the environment to be tested with fake implementations.
 """
 
-from typing import Protocol, Tuple, List, runtime_checkable
+from typing import List, Protocol, Tuple, runtime_checkable
+
 import numpy as np
 
 
@@ -74,7 +75,6 @@ class WindowsCapture:
     def __init__(self, hwnd: int, cap_x: int, cap_y: int, cap_w: int, cap_h: int,
                  background: bool = False, window_backend: 'WindowBackend' = None):
         import mss
-        import cv2
 
         self.hwnd = hwnd
         self.cap_x = int(cap_x)
@@ -121,10 +121,11 @@ class WindowsCapture:
 
     def _grab_bitblt(self) -> np.ndarray:
         """Background capture using PrintWindow."""
+        import ctypes
+
+        import cv2
         import win32gui
         import win32ui
-        import ctypes
-        import cv2
 
         hwnd = self.hwnd
 
@@ -194,9 +195,10 @@ class WindowsInput:
         if self.hwnd is None:
             return
 
-        import win32gui
-        import win32con
         import time
+
+        import win32con
+        import win32gui
 
         if self._last_focused_hwnd != self.hwnd:
             try:
@@ -266,8 +268,8 @@ class WindowsWindow:
         return matches[0]
 
     def focus_window(self, hwnd: int) -> None:
-        import win32gui
         import win32con
+        import win32gui
 
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         try:

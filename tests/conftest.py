@@ -3,15 +3,15 @@ Pytest configuration and shared fixtures.
 """
 
 import sys
-import os
-import pytest
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+import pytest
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tests.fakes.capture import FakeCapture, StaticFrameCapture, BlackFrameCapture
+from tests.fakes.capture import BlackFrameCapture, FakeCapture, StaticFrameCapture
 from tests.fakes.input import FakeInput
 from tests.fakes.window import FakeWindow
 
@@ -24,25 +24,25 @@ def default_config():
         "ppsspp_exe": r"C:\Program Files\PPSSPP\PPSSPPWindows64.exe",
         "rom_path": r"C:\test.iso",
         "tesseract_path": r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        
+
         # Window
         "window_title_substr": "PPSSPP",
-        
+
         # Controls
         "action_key": "Z",
         "reset_keys": ["ENTER"],
-        
+
         # Timing
         "agent_hz": 15,
         "hold_style": "hold",
         "tap_ms": 40,
         "reset_wait_s": 0.01,  # Fast for tests
-        
+
         # Observation
         "obs_w": 84,
         "obs_h": 84,
         "stack_n": 4,
-        
+
         # Done detection
         "use_gameover_template": False,  # Disabled for most tests
         "gameover_template_path": "gameover_template.png",
@@ -50,26 +50,29 @@ def default_config():
         "use_motion_done": True,
         "motion_diff_thresh": 1.5,
         "motion_static_steps": 5,  # Faster for tests
-        
+        "motion_debug": False,
+        "min_gameplay_steps_for_done": 0,
+        "game_state_done_confirm_frames": 1,
+
         # Capture
         "cap_x": 0,
         "cap_y": 0,
         "cap_w": 480,
         "cap_h": 272,
-        
+
         # OCR
         "score_roi_x": 10,
         "score_roi_y": 5,
         "score_roi_w": 120,
         "score_roi_h": 30,
         "use_ocr_reward": False,  # Disabled by default in tests
-        
+
         # Training
         "checkpoint_freq": 1000,
         "checkpoint_dir": "checkpoints",
         "model_dir": "models",
         "tensorboard_dir": "tb_jetpack",
-        
+
         # Background mode
         "use_background_capture": False,
     }

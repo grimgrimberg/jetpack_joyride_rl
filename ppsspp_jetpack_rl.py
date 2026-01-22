@@ -94,46 +94,66 @@ class GameState(Enum):
 def detect_game_state(frame_gray: np.ndarray, frame_bgr: np.ndarray = None, debug: bool = False) -> GameState:
     """Detect current game state from screen capture.
 
-    Key signals for death detection:
-    1. LOADING: Very dark screen (mean < 25) - transition after death
-    2. SAVE_DIALOG: Uniform gray screen (mean 100-140, low std)
-    3. RESULTS: Dark screen with some bright text areas
+    CONSERVATIVE APPROACH: Only trigger non-GAMEPLAY states when we're very confident.
 
-    If none of these match, we're probably in GAMEPLAY.
+    Based on analysis of 84x84 processed frames:
+    - LOADING/black frames: mean < 5, std < 2 (capture glitch or true loading)
+    - MENU screens (RESULTS/SAVE_DIALOG): mean 75-160, std < 12 (very uniform)
+    - GAMEPLAY: mean > 20, std > 5 (varied scenery, not as uniform)
+
+    Key insight: After resize to 84x84, menu screens become VERY uniform (std < 10)
+    while gameplay maintains variance even at low resolution.
     """
     mean_intensity = float(frame_gray.mean())
     std_intensity = float(frame_gray.std())
+    bright_ratio = float(np.sum(frame_gray > 200) / frame_gray.size)
 
     if debug:
-        print(f"[StateDetect] mean={mean_intensity:.1f}, std={std_intensity:.1f}")
+        print(f"[StateDetect] mean={mean_intensity:.1f}, std={std_intensity:.1f}, bright={bright_ratio:.2%}")
 
-    # Signal 1: Very dark screen = LOADING (transition after death)
-    # After Barry dies, there's often a dark fade transition
-    if mean_intensity < 25:
+    # Signal 1: BLACK/INVALID FRAME - Pure black or near-black capture glitch
+    # These are NOT real loading screens - they're capture timing issues
+    # Return GAMEPLAY to ignore them (don't trigger episode end/pause)
+    if mean_intensity < 5:
         if debug:
-            print(f"[StateDetect] -> LOADING (dark: mean={mean_intensity:.1f})")
+            print(f"[StateDetect] -> GAMEPLAY (ignoring black frame: mean={mean_intensity:.1f})")
+        return GameState.GAMEPLAY
+
+    # Signal 2: LOADING - Very dark transition screen (but not pure black)
+    # After death, shows dark loading before menu appears
+    # Must be very dark AND very uniform
+    if mean_intensity < 15 and std_intensity < 3:
+        if debug:
+            print(f"[StateDetect] -> LOADING (dark transition: mean={mean_intensity:.1f}, std={std_intensity:.1f})")
         return GameState.LOADING
 
-    # Signal 2: Uniform gray = SAVE_DIALOG
-    # The "Memory Stick" dialog has mean ~110-135 and very low std
-    if 100 < mean_intensity < 145 and std_intensity < 25:
+    # Signal 3: MENU SCREEN (RESULTS or SAVE_DIALOG) - Uniform mid-to-high brightness
+    # Menu screens at 84x84 are VERY uniform (std < 12) with mean in 75-160 range
+    # This covers: Results screen, Save dialog, Pause menu, any other UI overlay
+    if 75 < mean_intensity < 160 and std_intensity < 12:
         if debug:
-            print("[StateDetect] -> SAVE_DIALOG (uniform gray)")
-        return GameState.SAVE_DIALOG
+            print(f"[StateDetect] -> RESULTS (menu: mean={mean_intensity:.1f}, std={std_intensity:.1f})")
+        return GameState.RESULTS
 
-    # Signal 3: Dark with bright spots = RESULTS screen
-    # Results screen has dark background but white text
-    if mean_intensity < 70:
-        # Count bright pixels (text)
-        bright_ratio = np.sum(frame_gray > 180) / frame_gray.size
-        if bright_ratio > 0.02:  # Has some white text
-            if debug:
-                print(f"[StateDetect] -> RESULTS (dark+text: bright_ratio={bright_ratio:.3f})")
-            return GameState.RESULTS
+    # Signal 4: GAMEPLAY - Any brightness with significant variance (std > 5)
+    # OR moderate-low brightness (20-75) which is typical gameplay range
+    # Real gameplay has varied scenery even at low res
+    if std_intensity > 5 or (20 < mean_intensity < 75):
+        if debug:
+            print("[StateDetect] -> GAMEPLAY (varied scene)")
+        return GameState.GAMEPLAY
 
-    # Default: GAMEPLAY
+    # Fallback: If we can't confidently classify, check if it looks more like menu or gameplay
+    # High mean (>100) with any variance is likely still a menu/UI
+    if mean_intensity > 100:
+        if debug:
+            print(f"[StateDetect] -> RESULTS (bright fallback: mean={mean_intensity:.1f})")
+        return GameState.RESULTS
+
+    # Low-mid brightness with low variance - could be dark gameplay or transition
+    # Default to GAMEPLAY but this is uncertain territory
     if debug:
-        print("[StateDetect] -> GAMEPLAY (default)")
+        print(f"[StateDetect] -> GAMEPLAY (uncertain: mean={mean_intensity:.1f}, std={std_intensity:.1f})")
     return GameState.GAMEPLAY
 
 
@@ -171,6 +191,7 @@ CONFIG = {
     "use_motion_done": True,
     "motion_diff_thresh": 1.5,
     "motion_static_steps": 60,             # stricter motion detector to avoid false deaths
+    "motion_debug": False,
     # Episode-ending guards to avoid premature resets on transient black frames
     "min_gameplay_steps_for_done": 30,       # must see at least this many gameplay steps
     "game_state_done_confirm_frames": 6,     # require consecutive non-gameplay frames
@@ -517,6 +538,9 @@ class DoneDetector:
                 else:
                     self.static_count = 0
 
+                if self.cfg.get("motion_debug"):
+                    print(f"[motion-debug] mean_diff={mean_diff:.3f} static_count={self.static_count}")
+
                 if self.static_count >= self.cfg["motion_static_steps"]:
                     done_by_motion = True
 
@@ -528,59 +552,59 @@ class DoneDetector:
 # =========================
 class FeatureExtractor:
     """Extract structured features from game frame for MLP policy.
-    
+
     Extracts:
     - Barry's Y position (via face template matching)
     - Barry's velocity (frame-to-frame Y delta)
     - Nearest 5 objects: coins, zappers, missiles
-    
+
     Returns normalized 17-float vector per frame (68 with 4-frame stacking).
     """
-    
+
     # Object type encoding
     OBJ_NONE = 0
     OBJ_COIN = 1
     OBJ_ZAPPER = 2
     OBJ_MISSILE = 3
-    
+
     # Detection thresholds
     BARRY_THRESHOLD = 0.5
     COIN_THRESHOLD = 0.7
     ELECTRODE_THRESHOLD = 0.6
     MISSILE_THRESHOLD = 0.6
-    
+
     # Zapper pairing
     MAX_ZAPPER_LENGTH = 200  # Max pixels between electrode pairs
-    
+
     def __init__(self, templates_dir: str = "templates/", frame_w: int = 480, frame_h: int = 272):
         self.frame_w = frame_w
         self.frame_h = frame_h
         self.templates_dir = Path(templates_dir)
-        
+
         # State tracking
         self.prev_barry_y = frame_h / 2  # Start at center
         self.prev_features = None
-        
+
         # Performance: scale factor for faster template matching
         # 0.25 = 4x smaller = ~16x faster matching
         self.FAST_SCALE = 0.25
         self.fast_w = int(frame_w * self.FAST_SCALE)
         self.fast_h = int(frame_h * self.FAST_SCALE)
-        
+
         # Load and resize templates for fast matching
         self.barry_face = self._load_and_resize_template("barry_face.png")
         self.coin = self._load_and_resize_template("coin2.png")
         self.electrode = self._load_and_resize_template("electrode.png")
         self.missile = self._load_and_resize_template("Missile_Unbroken.jpeg")
-        
+
         # Fallback: create electrode template from zapper if not found
         if self.electrode is None:
             self._create_electrode_template()
-        
+
         # Fallback: create face template from fly.png if not found
         if self.barry_face is None:
             self._create_face_template()
-    
+
     def _load_template(self, filename: str) -> Optional[np.ndarray]:
         """Load template image, return None if not found."""
         path = self.templates_dir / filename
@@ -589,7 +613,7 @@ class FeatureExtractor:
             if img is not None:
                 return img
         return None
-    
+
     def _load_and_resize_template(self, filename: str) -> Optional[np.ndarray]:
         """Load template and resize for fast matching."""
         img = self._load_template(filename)
@@ -599,7 +623,7 @@ class FeatureExtractor:
             new_h = max(8, int(h * self.FAST_SCALE))
             return cv2.resize(img, (new_w, new_h))
         return None
-    
+
     def _create_electrode_template(self):
         """Create electrode template by cropping from zap.png."""
         zap = self._load_template("zap.png")
@@ -611,7 +635,7 @@ class FeatureExtractor:
             new_h = max(8, int(crop.shape[0] * self.FAST_SCALE))
             self.electrode = cv2.resize(crop, (new_w, new_h))
             print(f"[FeatureExtractor] Created electrode template: {self.electrode.shape[:2]}")
-    
+
     def _create_face_template(self):
         """Create face template by cropping from fly.png."""
         fly = self._load_template("fly.png")
@@ -624,12 +648,12 @@ class FeatureExtractor:
             new_h = max(8, int(face_h * self.FAST_SCALE))
             self.barry_face = cv2.resize(crop, (new_w, new_h))
             print(f"[FeatureExtractor] Created face template: {self.barry_face.shape[:2]}")
-    
+
     def extract(self, frame_bgr: np.ndarray) -> np.ndarray:
         """Extract normalized 17-float feature vector from frame."""
         # PERFORMANCE: Resize frame once for all template matching
         self._small_frame = cv2.resize(frame_bgr, (self.fast_w, self.fast_h))
-        
+
         barry_x, barry_y = self._detect_barry(self._small_frame)
         # Scale back to original coordinates
         barry_x = barry_x / self.FAST_SCALE
@@ -640,13 +664,13 @@ class FeatureExtractor:
         objects = self._detect_all_objects(self._small_frame, barry_y * self.FAST_SCALE)
 
         return self._build_vector(barry_y, velocity, objects)
-    
+
     def _detect_barry(self, frame_bgr: np.ndarray) -> Tuple[float, float]:
         """Detect Barry's position. Returns (x, y) in scaled coordinates."""
         # Barry is always in the left third of the screen (use scaled dimensions)
         search_w = frame_bgr.shape[1] // 3
         search_region = frame_bgr[:, :search_w]
-        
+
         if self.barry_face is not None:
             try:
                 result = cv2.matchTemplate(search_region, self.barry_face, cv2.TM_CCOEFF_NORMED)
@@ -657,7 +681,7 @@ class FeatureExtractor:
                     return (x, y)
             except cv2.error:
                 pass
-        
+
         # Fallback: color-based detection (Barry's skin/jetpack colors)
         # Look for bright orange-ish pixels in left region
         hsv = cv2.cvtColor(search_region, cv2.COLOR_BGR2HSV)
@@ -672,20 +696,20 @@ class FeatureExtractor:
                     x = M["m10"] / M["m00"]
                     y = M["m01"] / M["m00"]
                     return (x, y)
-        
+
         # Return previous position if detection fails
         return (getattr(self, 'last_barry_x', 70), self.prev_barry_y)
-    
+
     def _detect_barry_y(self, frame_bgr: np.ndarray) -> float:
         """Detect Barry's Y position (legacy wrapper)."""
         _, y = self._detect_barry(frame_bgr)
         return y
-    
+
     def _calc_velocity(self, current_y: float) -> float:
         """Calculate velocity from frame-to-frame Y delta."""
         velocity = current_y - self.prev_barry_y
         return max(-50, min(50, velocity))
-    
+
     def _detect_all_objects(self, frame_bgr: np.ndarray, barry_y: float) -> list:
         """Detect all objects and return sorted by X distance."""
         objects = []
@@ -694,17 +718,17 @@ class FeatureExtractor:
         objects.extend(self._detect_missiles(frame_bgr))
         objects.sort(key=lambda o: o['x'])
         return objects[:5]
-    
+
     def _detect_coins(self, frame_bgr: np.ndarray) -> list:
         if self.coin is None:
             return []
         return self._match_template(frame_bgr, self.coin, self.OBJ_COIN, self.COIN_THRESHOLD)
-    
+
     def _detect_missiles(self, frame_bgr: np.ndarray) -> list:
         if self.missile is None:
             return []
         return self._match_template(frame_bgr, self.missile, self.OBJ_MISSILE, self.MISSILE_THRESHOLD)
-    
+
     def _detect_zappers(self, frame_bgr: np.ndarray) -> list:
         """Detect zappers by finding electrode pairs."""
         if self.electrode is None:
@@ -729,8 +753,8 @@ class FeatureExtractor:
                     used.add(j)
                     break
         return zappers
-    
-    def _match_template(self, frame_bgr: np.ndarray, template: np.ndarray, 
+
+    def _match_template(self, frame_bgr: np.ndarray, template: np.ndarray,
                         obj_type: int, threshold: float) -> list:
         """Template matching with non-maximum suppression."""
         try:
@@ -745,7 +769,7 @@ class FeatureExtractor:
             return objects
         except cv2.error:
             return []
-    
+
     def _non_max_suppression(self, objects: list, overlap_dist: float) -> list:
         """Remove overlapping detections."""
         if len(objects) <= 1:
@@ -761,7 +785,7 @@ class FeatureExtractor:
             if not is_duplicate:
                 kept.append(obj)
         return kept
-    
+
     def _build_vector(self, barry_y: float, velocity: float, objects: list) -> np.ndarray:
         """Build normalized 17-float feature vector."""
         vec = np.zeros(17, dtype=np.float32)
@@ -779,7 +803,7 @@ class FeatureExtractor:
                 vec[base_idx + 1] = 0.0
                 vec[base_idx + 2] = 0.0
         return vec
-    
+
     def reset(self):
         """Reset state for new episode."""
         self.prev_barry_y = self.frame_h / 2
@@ -788,11 +812,11 @@ class FeatureExtractor:
 
 class CachedFeatureExtractor(FeatureExtractor):
     """Feature extractor with caching for faster training.
-    
+
     Only runs full template matching every N frames.
     Interpolates object positions in between.
     """
-    
+
     def __init__(self, templates_dir: str = "templates/", frame_w: int = 480, frame_h: int = 272,
                  detect_every_n: int = 3):
         super().__init__(templates_dir, frame_w, frame_h)
@@ -801,11 +825,11 @@ class CachedFeatureExtractor(FeatureExtractor):
         self.cached_objects = []
         self.cached_barry_y = frame_h / 2
         self.last_detections = {'barry': None, 'objects': [], 'confidence': {}}
-    
+
     def extract(self, frame_bgr: np.ndarray) -> np.ndarray:
         """Extract features with caching."""
         self.frame_count += 1
-        
+
         # Full detection every N frames
         if self.frame_count % self.detect_every_n == 0:
             barry_x, barry_y = self._detect_barry(frame_bgr)
@@ -826,31 +850,31 @@ class CachedFeatureExtractor(FeatureExtractor):
             barry_x = getattr(self, 'cached_barry_x', 70)
 
             objects = self._interpolate_objects()
-        
+
         velocity = self._calc_velocity(barry_y)
         self.prev_barry_y = barry_y
-        
+
         return self._build_vector(barry_y, velocity, objects)
-    
+
     def _interpolate_objects(self) -> list:
         """Interpolate object positions (objects move left)."""
         interpolated = []
         scroll_speed = 5  # pixels per frame estimate
-        
+
         for obj in self.cached_objects:
             new_obj = obj.copy()
             new_obj['x'] = max(0, obj['x'] - scroll_speed)  # Objects scroll left
             if new_obj['x'] > 0:  # Only keep if still on screen
                 interpolated.append(new_obj)
-        
+
         # Update cache with interpolated positions
         self.cached_objects = interpolated
         return interpolated
-    
+
     def get_last_detections(self) -> dict:
         """Get last detection results for visualization."""
         return self.last_detections
-    
+
     def reset(self):
         """Reset state for new episode."""
         super().reset()
@@ -861,41 +885,41 @@ class CachedFeatureExtractor(FeatureExtractor):
 
 class TrainingVisualizerGUI:
     """Tkinter GUI for visualizing training in real-time.
-    
+
     Shows:
     - Game frame with detection overlays
     - Barry position marked
     - Objects with colored boxes
     - Episode statistics
     """
-    
+
     def __init__(self, title: str = "Jetpack RL Training Monitor"):
         self.root = tk.Tk()
         self.root.title(title)
         self.root.geometry("900x500")
-        
+
         # Main frame
         self.main_frame = ttk.Frame(self.root, padding="10")
         self.main_frame.grid(row=0, column=0, sticky="nsew")
-        
+
         # Left panel - game view
         self.game_frame = ttk.LabelFrame(self.main_frame, text="Game View", padding="5")
         self.game_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        
+
         self.canvas = tk.Canvas(self.game_frame, width=480, height=272, bg="black")
         self.canvas.pack()
-        
+
         # Detection info below canvas
         self.detection_label = ttk.Label(self.game_frame, text="Detection: -", font=("Consolas", 9))
         self.detection_label.pack(pady=5)
-        
+
         # Right panel - stats
         self.stats_frame = ttk.LabelFrame(self.main_frame, text="Training Stats", padding="10")
         self.stats_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
-        
+
         # Stats labels - including debug stats for state detection
         self.stats_labels = {}
-        stats = ["Episode", "Total Steps", "Episode Steps", "Episode Reward", 
+        stats = ["Episode", "Total Steps", "Episode Steps", "Episode Reward",
                  "Avg Reward", "FPS", "Game State", "Pixel Mean", "Pixel Std", "State Reason"]
         for i, stat in enumerate(stats):
             ttk.Label(self.stats_frame, text=f"{stat}:", font=("Arial", 10, "bold")).grid(
@@ -903,66 +927,66 @@ class TrainingVisualizerGUI:
             self.stats_labels[stat] = ttk.Label(self.stats_frame, text="-", font=("Arial", 10))
             self.stats_labels[stat].grid(row=i, column=1, sticky="w", padx=10, pady=2)
 
-        
+
         # Control buttons
         self.control_frame = ttk.Frame(self.main_frame)
         self.control_frame.grid(row=1, column=0, columnspan=2, pady=10)
-        
+
         self.paused = False
         self.stopped = False
-        
+
         self.pause_btn = ttk.Button(self.control_frame, text="Pause", command=self._toggle_pause)
         self.pause_btn.pack(side="left", padx=5)
-        
+
         self.stop_btn = ttk.Button(self.control_frame, text="Stop", command=self._stop)
         self.stop_btn.pack(side="left", padx=5)
-        
+
         # Configure grid weights
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         self.main_frame.columnconfigure(0, weight=2)
         self.main_frame.columnconfigure(1, weight=1)
-        
+
         self._photo = None
         self._last_update = time.time()
-    
+
     def _toggle_pause(self):
         self.paused = not self.paused
         self.pause_btn.config(text="Resume" if self.paused else "Pause")
-    
+
     def _stop(self):
         self.stopped = True
-    
+
     def update(self, frame_bgr: np.ndarray, detections: dict, stats: dict):
         """Update GUI with new frame and stats."""
         if self.stopped:
             return
-        
+
         # PERFORMANCE: Throttle updates to ~5 FPS (every 200ms)
         now = time.time()
         if now - self._last_update < 0.2:
             return
         self._last_update = now
-        
+
         # Convert to grayscale for performance display
         if frame_bgr is not None:
             gray_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
             display_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)  # Back to BGR for drawing
         else:
             display_frame = np.zeros((272, 480, 3), dtype=np.uint8)
-        
+
         # Draw Barry position
         if detections.get('barry') is not None:
             barry_y = int(detections['barry'])
             barry_x = int(detections.get('barry_x', 70))  # Use detected X position
             cv2.circle(display_frame, (barry_x, barry_y), 15, (0, 255, 0), 2)  # Green circle
-            cv2.putText(display_frame, "Barry", (barry_x - 20, barry_y - 20), 
+            cv2.putText(display_frame, "Barry", (barry_x - 20, barry_y - 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        
+
         # Draw objects
         colors = {1: (0, 215, 255), 2: (0, 0, 255), 3: (0, 165, 255)}  # Coin=gold, Zapper=red, Missile=orange
         names = {1: "Coin", 2: "Zap", 3: "Mis"}
-        
+
         for obj in detections.get('objects', []):
             x, y = int(obj['x']), int(obj['y'])
             obj_type = obj.get('type', 0)
@@ -970,37 +994,37 @@ class TrainingVisualizerGUI:
             name = names.get(obj_type, "?")
             cv2.rectangle(display_frame, (x-15, y-15), (x+15, y+15), color, 2)
             cv2.putText(display_frame, name, (x-10, y-20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-        
+
         # Convert to PhotoImage
         rgb_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
 
         pil_img = Image.fromarray(rgb_frame)
         self._photo = ImageTk.PhotoImage(pil_img)
-        
+
         # Update canvas
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
-        
+
         # Update detection label
         barry_str = f"Barry Y: {detections.get('barry', 0):.1f}" if detections.get('barry') else "Barry: -"
         obj_count = len(detections.get('objects', []))
         self.detection_label.config(text=f"{barry_str} | Objects: {obj_count}")
-        
+
         # Update stats
         for key, value in stats.items():
             if key in self.stats_labels:
                 self.stats_labels[key].config(text=str(value))
-        
+
         # Process Tkinter events
         self.root.update_idletasks()
         self.root.update()
-    
+
     def is_stopped(self) -> bool:
         return self.stopped
-    
+
     def is_paused(self) -> bool:
         return self.paused
-    
+
     def close(self):
         try:
             self.root.destroy()
@@ -1040,15 +1064,21 @@ class JetpackPPSSPPEnv(gym.Env):
         - capture_backend: CaptureBackend protocol for screen capture
         - input_backend: InputBackend protocol for keyboard input
         - window_backend: WindowBackend protocol for window management
+
+    Args:
+        gameplay_only: If True, wait for manual navigation to gameplay,
+                       pause during menus instead of ending episodes.
     """
 
     metadata = {"render_modes": ["human"]}
 
     def __init__(self, cfg: dict, render_mode: str = None,
-                 capture_backend=None, input_backend=None, window_backend=None):
+                 capture_backend=None, input_backend=None, window_backend=None,
+                 gameplay_only: bool = False):
         super().__init__()
         self.cfg = cfg
         self.render_mode = render_mode
+        self.gameplay_only = gameplay_only
 
         # Injected backends (for testing)
         self._capture_backend = capture_backend
@@ -1086,6 +1116,8 @@ class JetpackPPSSPPEnv(gym.Env):
         self._has_seen_gameplay = False
         self._gameplay_steps = 0
         self._non_gameplay_frames = 0
+        self._waiting_for_gameplay = False  # gameplay_only mode: waiting for user to navigate
+        self._paused_for_menu = False  # gameplay_only mode: paused during menu
 
     def _ensure_window(self):
         # Use injected backends if available (for testing)
@@ -1178,13 +1210,20 @@ class JetpackPPSSPPEnv(gym.Env):
         3. Loading -> wait
         4. Laboratory -> press Z to start running
         5. Gameplay -> begin training
+
+        If gameplay_only=True, waits for user to manually navigate to gameplay.
         """
         super().reset(seed=seed)
         self._ensure_window()
         self._release_action()
 
-        # Navigate through menus until we reach gameplay
-        self._navigate_to_gameplay()
+        started_in_gameplay = False
+        if self.gameplay_only:
+            # Wait for user to manually navigate to gameplay
+            started_in_gameplay = self._wait_for_gameplay_manual()
+        else:
+            # Navigate through menus until we reach gameplay
+            self._navigate_to_gameplay()
 
         self.done_detector.reset()
         self.prev_score = 0
@@ -1198,11 +1237,44 @@ class JetpackPPSSPPEnv(gym.Env):
         self._last_reward = 0.0
         self._last_done_reason = None
         self._last_state = GameState.UNKNOWN
-        self._has_seen_gameplay = False
+        self._has_seen_gameplay = started_in_gameplay
         self._gameplay_steps = 0
         self._non_gameplay_frames = 0
+        self._waiting_for_gameplay = False
+        self._paused_for_menu = False
 
         return self._stack_obs(), {}
+
+    def _wait_for_gameplay_manual(self, timeout: float = 300.0) -> bool:
+        """Wait for user to manually navigate to gameplay state.
+
+        Used in gameplay_only mode. Shows status and waits for GAMEPLAY state.
+        """
+        print("[Gameplay-Only] Waiting for gameplay... Navigate to gameplay manually.")
+        print("[Gameplay-Only] Press Z in-game to start running when ready.")
+
+        self._waiting_for_gameplay = True
+        start_time = time.time()
+        last_state = None
+
+        while time.time() - start_time < timeout:
+            proc, frame_bgr = self._grab_proc()
+            state = detect_game_state(proc, frame_bgr)
+
+            if state != last_state:
+                print(f"[Gameplay-Only] Detected state: {state.name} (mean={proc.mean():.1f})")
+                last_state = state
+
+            if state == GameState.GAMEPLAY:
+                print("[Gameplay-Only] Gameplay detected! Starting episode.")
+                self._waiting_for_gameplay = False
+                return True
+
+            time.sleep(0.1)
+
+        print(f"[Warning] Timeout waiting for gameplay after {timeout}s")
+        self._waiting_for_gameplay = False
+        return False
 
     def _navigate_to_gameplay(self, max_attempts: int = 60, debug: bool = False):
         """Navigate through menus until gameplay state is detected.
@@ -1289,8 +1361,10 @@ class JetpackPPSSPPEnv(gym.Env):
             proc, frame_bgr = self._grab_proc()
             self.frames.append(proc)
 
-            # Calculate reward
-            reward = 0.1  # Small survival bonus (better scaling)
+            # Calculate reward - survival bonus scaled by time alive
+            # Start small, grow as agent survives longer (encourages staying alive)
+            survival_bonus = 1.0 + (self._gameplay_steps / 100.0)  # 1.0 -> 2.0+ over time
+            reward = survival_bonus
             done_reason = None
 
             if self.score_extractor and self.cfg["use_ocr_reward"]:
@@ -1306,10 +1380,11 @@ class JetpackPPSSPPEnv(gym.Env):
 
             # If we haven't reached gameplay yet, try to navigate and avoid ending early
             if not self._has_seen_gameplay and game_state != GameState.GAMEPLAY:
-                self._navigate_to_gameplay(max_attempts=6, debug=False)
-                proc, frame_bgr = self._grab_proc()
-                self.frames[-1] = proc
-                game_state = detect_game_state(proc, frame_bgr)
+                if not self.gameplay_only:
+                    self._navigate_to_gameplay(max_attempts=6, debug=False)
+                    proc, frame_bgr = self._grab_proc()
+                    self.frames[-1] = proc
+                    game_state = detect_game_state(proc, frame_bgr)
 
             if game_state == GameState.GAMEPLAY:
                 self._has_seen_gameplay = True
@@ -1322,11 +1397,42 @@ class JetpackPPSSPPEnv(gym.Env):
                     self._non_gameplay_frames += 1
 
             done = False
+            truncated = False
 
             if self._has_seen_gameplay:
                 enough_steps = self._gameplay_steps >= self.cfg.get("min_gameplay_steps_for_done", 0)
+                confirm_frames = self.cfg.get("game_state_done_confirm_frames", 1)
+
+                # Gameplay-only mode: pause during menus instead of ending episode
+                # Only react to REAL menu states (RESULTS, SAVE_DIALOG), not LOADING/UNKNOWN
+                if self.gameplay_only and game_state in (GameState.RESULTS, GameState.SAVE_DIALOG, GameState.LABORATORY):
+                    # End episode on death screens even in gameplay-only mode
+                    if game_state in (GameState.RESULTS, GameState.SAVE_DIALOG):
+                        if enough_steps and self._non_gameplay_frames >= confirm_frames:
+                            done = True
+                            done_reason = done_reason or f"death_{game_state.name.lower()}"
+                            print(f"[Step] DONE by death: {game_state.name}, mean={float(proc.mean()):.1f}")
+                    elif game_state == GameState.LABORATORY:
+                        # Laboratory = start area, just need to press Z to begin
+                        if not self._paused_for_menu:
+                            print("[Gameplay-Only] Laboratory detected, waiting for gameplay...")
+                            self._paused_for_menu = True
+                        self._release_action()
+                        # Wait for gameplay to resume
+                        resumed = self._wait_for_gameplay_manual(timeout=60.0)
+                        self._paused_for_menu = False
+                        if not resumed:
+                            truncated = True
+                            done_reason = done_reason or "wait_timeout"
+                        else:
+                            # Re-grab frame after resuming
+                            proc, frame_bgr = self._grab_proc()
+                            self.frames[-1] = proc
+                            game_state = detect_game_state(proc, frame_bgr)
+                            reward = 0.0  # No reward for paused time
+
                 # Method 1: Motion/template based done detector
-                if enough_steps and self.done_detector.is_done(proc):
+                elif enough_steps and self.done_detector.is_done(proc):
                     done = True
                     done_reason = "done_detector"
                     print("[Step] DONE by motion/template detector")
@@ -1334,8 +1440,7 @@ class JetpackPPSSPPEnv(gym.Env):
                 # Method 2: GameState detection (more reliable for death)
                 # ONLY end on death states (RESULTS, SAVE_DIALOG)
                 # LOADING is restart transition - don't end episode there
-                confirm_frames = self.cfg.get("game_state_done_confirm_frames", 1)
-                if game_state in (GameState.RESULTS, GameState.SAVE_DIALOG):
+                if not self.gameplay_only and game_state in (GameState.RESULTS, GameState.SAVE_DIALOG):
                     if enough_steps and self._non_gameplay_frames >= confirm_frames:
                         done = True
                         done_reason = done_reason or f"death_{game_state.name.lower()}"
@@ -1343,7 +1448,11 @@ class JetpackPPSSPPEnv(gym.Env):
 
 
             if done:
-                reward = -10.0  # Death penalty (reduced from -100 for better learning)
+                # Death penalty scaled by how long we survived
+                # Dying early = small penalty, dying late = bigger penalty
+                # This encourages longer survival without overwhelming early learning
+                death_penalty = -5.0 - (self._gameplay_steps / 20.0)  # -5 to -10+ depending on run length
+                reward = death_penalty
                 self._release_action()
 
             self._last_action = int(action)
@@ -1358,9 +1467,11 @@ class JetpackPPSSPPEnv(gym.Env):
                 "game_state": game_state.name,
                 "waiting_for_gameplay": not self._has_seen_gameplay,
                 "gameplay_steps": self._gameplay_steps,
+                "paused_for_menu": self._paused_for_menu,
+                "waiting_for_gameplay_manual": self._waiting_for_gameplay,
             }
 
-            return self._stack_obs(), reward, done, False, info
+            return self._stack_obs(), reward, done, truncated, info
 
         except Exception:
             # INV-1: Always release keys on exception to prevent stuck keys
@@ -1409,26 +1520,27 @@ class JetpackPPSSPPEnv(gym.Env):
 # =========================
 class JetpackMLPEnv(JetpackPPSSPPEnv):
     """MLP-based environment using structured feature observations.
-    
+
     Uses CachedFeatureExtractor for faster training:
     - Full detection every 3 frames, interpolates between
     - Barry Y position and velocity
     - 5 nearest objects (x, y, type each)
-    
+
     With 4-frame stacking: 68-float observation space.
-    
+
     Optional GUI visualization via TrainingVisualizerGUI.
     """
-    
+
     # Minimum steps before allowing episode to end
     MIN_GAMEPLAY_STEPS = 30  # ~2 seconds at 15Hz
-    
+
     def __init__(self, cfg: dict, render_mode: str = None,
                  capture_backend=None, input_backend=None, window_backend=None,
-                 use_gui: bool = False):
+                 use_gui: bool = False, gameplay_only: bool = False):
         # Initialize parent (CNN-based env)
-        super().__init__(cfg, render_mode, capture_backend, input_backend, window_backend)
-        
+        super().__init__(cfg, render_mode, capture_backend, input_backend, window_backend,
+                         gameplay_only=gameplay_only)
+
         # Use cached feature extractor for speed
         detect_every_n = cfg.get("detect_every_n", 3)
         self.feature_extractor = CachedFeatureExtractor(
@@ -1437,18 +1549,18 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
             frame_h=cfg["cap_h"],
             detect_every_n=detect_every_n
         )
-        
+
         # 17 features × 4 stacked frames = 68
         self.feature_stack_n = cfg.get("stack_n", 4)
         self.feature_frames = deque(maxlen=self.feature_stack_n)
-        
+
         # Override observation space
         self.observation_space = spaces.Box(
             low=-1.0, high=1.0,
             shape=(17 * self.feature_stack_n,),
             dtype=np.float32
         )
-        
+
         # GUI visualization
         self.use_gui = use_gui
         self.gui = None
@@ -1458,7 +1570,7 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
             except Exception as e:
                 print(f"[Warning] Could not initialize GUI: {e}")
                 self.use_gui = False
-        
+
         # Episode tracking for improved stats
         self.episode_count = 0
         self.total_steps = 0
@@ -1468,55 +1580,55 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
         self._fps_counter = 0
         self._fps_time = time.time()
         self._current_fps = 0.0
-    
+
     def _stack_features(self) -> np.ndarray:
         """Stack feature vectors into flat observation."""
         assert len(self.feature_frames) == self.feature_stack_n
         return np.concatenate(list(self.feature_frames), axis=0)
-    
+
     def reset(self, seed=None, options=None):
         """Reset and return feature-based observation."""
         # Track episode completion
         if self.episode_steps > 0:
             self.episode_rewards_history.append(self.episode_reward)
             self.episode_count += 1
-        
+
         # Use parent reset for navigation
         super().reset(seed=seed, options=options)
-        
+
         self.feature_extractor.reset()
         self.feature_frames.clear()
-        
+
         # Reset episode tracking
         self.episode_steps = 0
         self.episode_reward = 0.0
-        
+
         # Get initial frame and extract features
         frame = self._last_frame
         if frame is None:
             frame = self.cap.grab()
-        
+
         features = self.feature_extractor.extract(frame)
         for _ in range(self.feature_stack_n):
             self.feature_frames.append(features.copy())
-        
+
         return self._stack_features(), {}
-    
+
     def step(self, action):
         """Step and return feature-based observation."""
         # Use parent step (handles input, timing, done detection)
         _, reward, done, truncated, info = super().step(action)
-        
+
         # Episode must have minimum steps before allowing DONE
         if done and self.episode_steps < self.MIN_GAMEPLAY_STEPS:
             done = False
             info['done_blocked'] = f"Need {self.MIN_GAMEPLAY_STEPS - self.episode_steps} more steps"
-        
+
         # Update tracking
         self.episode_steps += 1
         self.total_steps += 1
         self.episode_reward += reward
-        
+
         # Calculate FPS
         self._fps_counter += 1
         now = time.time()
@@ -1524,24 +1636,24 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
             self._current_fps = self._fps_counter / (now - self._fps_time)
             self._fps_counter = 0
             self._fps_time = now
-        
+
         # PERF: Reuse parent's captured frame instead of recapturing
         raw_frame = self._last_raw_frame
-        
+
         if raw_frame is not None:
             features = self.feature_extractor.extract(raw_frame)
             self.feature_frames.append(features)
 
-            
+
             # Update GUI if enabled (pass raw color frame, not preprocessed)
             if self.use_gui and self.gui:
                 avg_reward = sum(self.episode_rewards_history[-10:]) / max(1, len(self.episode_rewards_history[-10:]))
-                
+
                 # DEBUG: Calculate state detection values for visualization
                 gray_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
                 pixel_mean = float(gray_frame.mean())
                 pixel_std = float(gray_frame.std())
-                
+
                 # Determine why this state was detected
                 state_reason = "Default=GAMEPLAY"
                 if pixel_mean < 25:
@@ -1552,7 +1664,7 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
                     bright_ratio = np.sum(gray_frame > 180) / gray_frame.size
                     if bright_ratio > 0.02:
                         state_reason = f"dark+text({bright_ratio:.2f}) → RESULTS"
-                
+
                 stats = {
                     "Episode": self.episode_count + 1,
                     "Total Steps": self.total_steps,
@@ -1568,15 +1680,15 @@ class JetpackMLPEnv(JetpackPPSSPPEnv):
                 detections = self.feature_extractor.get_last_detections()
                 self.gui.update(raw_frame, detections, stats)
 
-                
+
                 if self.gui.is_stopped():
                     done = True
                     truncated = True
                     info['stopped_by_gui'] = True
-        
+
         return self._stack_features(), reward, done, truncated, info
 
-    
+
     def close(self):
         """Clean up resources."""
         if self.gui:
@@ -2163,6 +2275,149 @@ def diagnose_capture(cfg: dict, num_frames: int = 30):
 
     print()
 
+    # Live game state visualization
+    print("=" * 60)
+    print("LIVE GAME STATE MONITOR")
+    print("=" * 60)
+    print("Showing real-time game state detection for 30 seconds...")
+    print("Press 'q' to quit early, 's' to save current frame.\n")
+
+    # Create debug directory for saved frames
+    debug_dir = Path("debug_frames")
+    debug_dir.mkdir(exist_ok=True)
+
+    cap = ScreenCapture(hwnd, cfg["cap_x"], cfg["cap_y"], cfg["cap_w"], cfg["cap_h"],
+                        background=cfg.get("use_background_capture", False))
+
+    state_counts = {s: 0 for s in GameState}
+    state_transitions = []
+    last_state = None
+    start_time = time.time()
+    frame_count = 0
+    transition_count = 0
+
+    while time.time() - start_time < 30.0:
+        frame = cap.grab()
+        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+        proc = preprocess_frame(frame, cfg["obs_w"], cfg["obs_h"])
+
+        state = detect_game_state(proc, frame)
+        state_counts[state] += 1
+        frame_count += 1
+
+        if state != last_state:
+            elapsed = time.time() - start_time
+            state_transitions.append((elapsed, last_state, state))
+
+            # Calculate values for logging
+            mean_val = float(proc.mean())
+            std_val = float(proc.std())
+            bright_ratio = float(np.sum(proc > 200) / proc.size)
+
+            if last_state is not None:
+                # Show stats that caused the transition
+                print(f"  [{elapsed:5.1f}s] {last_state.name:12} -> {state.name} (mean={mean_val:.1f}, std={std_val:.1f}, bright={bright_ratio:.1%})")
+
+                # AUTO-SAVE frames on every transition
+                transition_count += 1
+                timestamp = int(elapsed * 1000)
+                raw_path = debug_dir / f"trans{transition_count:03d}_{timestamp}ms_{last_state.name}_to_{state.name}_raw.png"
+                proc_path = debug_dir / f"trans{transition_count:03d}_{timestamp}ms_{last_state.name}_to_{state.name}_proc.png"
+                cv2.imwrite(str(raw_path), frame)
+                cv2.imwrite(str(proc_path), proc)
+                print(f"       📸 Saved: {raw_path.name}")
+
+            last_state = state
+
+        # Create visualization
+        display = cv2.resize(frame, (480, 272))
+        proc_display = cv2.resize(proc, (272, 272), interpolation=cv2.INTER_NEAREST)
+        proc_display = cv2.cvtColor(proc_display, cv2.COLOR_GRAY2BGR)
+
+        # State color coding
+        state_colors = {
+            GameState.GAMEPLAY: (0, 255, 0),      # Green
+            GameState.LOADING: (0, 0, 255),       # Red
+            GameState.RESULTS: (0, 165, 255),     # Orange
+            GameState.SAVE_DIALOG: (0, 255, 255), # Yellow
+            GameState.LABORATORY: (255, 255, 0),  # Cyan
+            GameState.UNKNOWN: (128, 128, 128),   # Gray
+        }
+        color = state_colors.get(state, (255, 255, 255))
+
+        # Calculate detection values
+        mean_val = float(proc.mean())
+        std_val = float(proc.std())
+        bright_ratio = float(np.sum(proc > 200) / proc.size)  # Match threshold in detect_game_state
+
+        # Draw state indicator with all values
+        cv2.rectangle(display, (5, 5), (240, 100), (0, 0, 0), -1)
+        cv2.putText(display, f"State: {state.name}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        cv2.putText(display, f"Mean: {mean_val:.1f} (<40=dark)", (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        cv2.putText(display, f"Std:  {std_val:.1f} (<30=uniform)", (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        cv2.putText(display, f"Bright: {bright_ratio:.1%} (>8%=text)", (10, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+
+        # Show which thresholds would trigger RESULTS
+        would_be_results = mean_val < 40 and std_val < 30 and bright_ratio > 0.08
+        result_color = (0, 0, 255) if would_be_results else (0, 255, 0)
+        cv2.putText(display, f"RESULTS trigger: {'YES' if would_be_results else 'NO'}", (10, 95),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, result_color, 1)
+
+        # Draw on processed view
+        cv2.putText(proc_display, f"std: {std_val:.1f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Combine views
+        combined = np.hstack([display, proc_display])
+        cv2.imshow("Game State Diagnostics (q=quit, s=save frame)", combined)
+
+        key = cv2.waitKey(33) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('s'):
+            # Manual save
+            timestamp = int((time.time() - start_time) * 1000)
+            manual_raw = debug_dir / f"manual_{timestamp}ms_{state.name}_raw.png"
+            manual_proc = debug_dir / f"manual_{timestamp}ms_{state.name}_proc.png"
+            cv2.imwrite(str(manual_raw), frame)
+            cv2.imwrite(str(manual_proc), proc)
+            print(f"  📸 Manual save: {manual_raw.name}")
+
+    cap.close()
+    cv2.destroyAllWindows()
+
+    # Print summary
+    print(f"\n📊 GAME STATE SUMMARY ({frame_count} frames in {time.time() - start_time:.1f}s):")
+    print(f"   Frames saved to: {debug_dir.absolute()}")
+    for state in GameState:
+        count = state_counts[state]
+        pct = 100.0 * count / max(frame_count, 1)
+        bar = "█" * int(pct / 5)
+        if count > 0:
+            print(f"  {state.name:12}: {count:4} ({pct:5.1f}%) {bar}")
+
+    print(f"\n🔄 State transitions: {len(state_transitions)}")
+
+    # Diagnosis
+    gameplay_pct = 100.0 * state_counts[GameState.GAMEPLAY] / max(frame_count, 1)
+    menu_pct = 100.0 * (state_counts[GameState.RESULTS] + state_counts[GameState.SAVE_DIALOG]) / max(frame_count, 1)
+
+    print("\n💡 DIAGNOSIS:")
+    if gameplay_pct < 20:
+        print("  ❌ Very little GAMEPLAY detected!")
+        print("     - Make sure the game is running and in active gameplay")
+        print("     - Use --gameplay-only flag to wait for manual navigation")
+    elif gameplay_pct < 50:
+        print("  ⚠️  Low GAMEPLAY time - agent may be dying frequently")
+        print("     - Try --gameplay-only flag to train only during gameplay")
+    else:
+        print("  ✅ Good GAMEPLAY detection rate")
+
+    if menu_pct > 30:
+        print("  ⚠️  High menu time - episodes ending frequently on death")
+        print("     - Consider --gameplay-only flag to pause during menus")
+
+    print()
+
 
 def debug_visual(cfg: dict):
     """Show live visualization of what the agent sees.
@@ -2306,9 +2561,10 @@ def visualize_network(cfg: dict):
     env.close()
 
 
-def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb: bool = False, use_mlp: bool = False, use_gui: bool = False):
+def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb: bool = False,
+              use_mlp: bool = False, use_gui: bool = False, gameplay_only: bool = False):
     """Train PPO agent.
-    
+
     Args:
         cfg: Configuration dictionary
         timesteps: Total training timesteps
@@ -2316,6 +2572,7 @@ def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb:
         use_wandb: Enable Weights & Biases logging
         use_mlp: Use MLP policy with structured features instead of CNN
         use_gui: Show training GUI with detection visualization (MLP only)
+        gameplay_only: Wait for manual navigation, pause during menus
     """
     global _env_global
 
@@ -2323,12 +2580,15 @@ def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb:
     Path(cfg["checkpoint_dir"]).mkdir(exist_ok=True)
     Path(cfg["model_dir"]).mkdir(exist_ok=True)
 
+    if gameplay_only:
+        print("[Gameplay-Only Mode] Will wait for manual navigation and pause during menus")
+
     # Create environment (MLP or CNN)
     if use_mlp:
         print("[MLP Mode] Using structured features with CachedFeatureExtractor")
         if use_gui:
             print("[GUI Mode] Training visualization enabled")
-        env = DummyVecEnv([lambda: JetpackMLPEnv(cfg, use_gui=use_gui)])
+        env = DummyVecEnv([lambda: JetpackMLPEnv(cfg, use_gui=use_gui, gameplay_only=gameplay_only)])
         policy_name = "MlpPolicy"
         policy_kwargs = dict(
             net_arch=[128, 128],  # 2 hidden layers, 128 units each
@@ -2337,10 +2597,10 @@ def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb:
         if use_gui:
             print("[Warning] --gui flag only works with --mlp mode")
         print("[CNN Mode] Using raw pixels with CnnPolicy")
-        env = DummyVecEnv([lambda: JetpackPPSSPPEnv(cfg)])
+        env = DummyVecEnv([lambda: JetpackPPSSPPEnv(cfg, gameplay_only=gameplay_only)])
         policy_name = "CnnPolicy"
         policy_kwargs = None
-    
+
     _env_global = env
 
     # Callbacks
@@ -2376,10 +2636,15 @@ def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb:
             policy_name,
             env,
             verbose=1,
-            n_steps=1024,
-            batch_size=256,
-            gamma=0.99,
-            learning_rate=2.5e-4,
+            n_steps=512,           # Smaller for faster updates (real-time game)
+            batch_size=64,          # Smaller batches for more gradient updates
+            gamma=0.95,             # Lower gamma - focus on near-term survival
+            learning_rate=3e-4,     # Slightly higher LR
+            ent_coef=0.01,          # Encourage exploration
+            clip_range=0.2,
+            gae_lambda=0.95,
+            max_grad_norm=0.5,
+            vf_coef=0.5,
             policy_kwargs=policy_kwargs,
             tensorboard_log=cfg["tensorboard_dir"],
         )
@@ -2400,20 +2665,39 @@ def train_ppo(cfg: dict, timesteps: int = 300000, resume: str = None, use_wandb:
     env.close()
 
 
-def evaluate(cfg: dict, model_path: str, episodes: int = 10):
-    """Evaluate trained model."""
+def evaluate(cfg: dict, model_path: str, episodes: int = 10, use_mlp: bool = False,
+             use_gui: bool = False, gameplay_only: bool = False):
+    """Evaluate trained model.
+
+    Args:
+        cfg: Configuration dictionary
+        model_path: Path to model .zip file
+        episodes: Number of evaluation episodes
+        use_mlp: Use MLP environment (must match training)
+        use_gui: Show visualization GUI
+        gameplay_only: Wait for manual navigation, pause during menus
+    """
     global _env_global
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model not found: {model_path}")
 
-    env = JetpackPPSSPPEnv(cfg, render_mode="human")
+    if gameplay_only:
+        print("[Gameplay-Only Mode] Will wait for manual navigation and pause during menus")
+
+    # Use correct environment class based on model type
+    if use_mlp:
+        print("[MLP Eval] Using JetpackMLPEnv for evaluation")
+        env = JetpackMLPEnv(cfg, render_mode="human", use_gui=use_gui, gameplay_only=gameplay_only)
+    else:
+        env = JetpackPPSSPPEnv(cfg, render_mode="human", gameplay_only=gameplay_only)
     _env_global = env
 
     model = PPO.load(model_path)
 
     print(f"Evaluating model: {model_path}")
     print(f"Running {episodes} episodes...")
+
 
     total_rewards = []
 
@@ -2462,6 +2746,8 @@ def main():
     parser.add_argument("--background", action="store_true", help="Use background capture (no focus needed)")
     parser.add_argument("--mlp", action="store_true", help="Use MLP policy with structured features (instead of CNN)")
     parser.add_argument("--gui", action="store_true", help="Show training GUI with detection visualization")
+    parser.add_argument("--gameplay-only", action="store_true", dest="gameplay_only",
+                        help="Wait for manual navigation, pause during menus (no auto-restart)")
 
     args = parser.parse_args()
 
@@ -2506,12 +2792,14 @@ def main():
         return
 
     if args.train:
-        train_ppo(CONFIG, timesteps=args.timesteps, resume=args.resume, use_wandb=args.wandb, use_mlp=args.mlp, use_gui=args.gui)
+        train_ppo(CONFIG, timesteps=args.timesteps, resume=args.resume, use_wandb=args.wandb,
+                  use_mlp=args.mlp, use_gui=args.gui, gameplay_only=args.gameplay_only)
         return
 
     if args.eval:
-        evaluate(CONFIG, args.eval)
+        evaluate(CONFIG, args.eval, use_mlp=args.mlp, use_gui=args.gui, gameplay_only=args.gameplay_only)
         return
+
 
     parser.print_help()
 
